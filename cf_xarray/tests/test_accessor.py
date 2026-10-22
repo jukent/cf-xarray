@@ -1,8 +1,9 @@
 import itertools
 import pickle
+import warnings
 from textwrap import dedent
-from urllib.request import urlopen
 
+import dask.array
 import matplotlib as mpl
 import numpy as np
 import pandas as pd
@@ -13,6 +14,7 @@ from xarray import Dataset
 from xarray.testing import assert_allclose, assert_identical
 
 import cf_xarray  # noqa
+from cf_xarray.helpers import vertices_to_bounds
 from cf_xarray.utils import parse_cf_standard_name_table
 
 from ..datasets import (
@@ -21,16 +23,33 @@ from ..datasets import (
     anc,
     basin,
     ds_no_attrs,
+    ds_with_tuple,
     dsg,
+    flag_excl,
+    flag_indep,
+    flag_indep_uint16,
+    flag_mix,
     forecast,
     mollwds,
     multiple,
-    pomds,
     popds,
     romsds,
+    rotds,
+    sgrid_delft,
+    sgrid_delft3,
+    sgrid_roms,
     vert,
 )
-from . import raise_if_dask_computes, requires_cftime, requires_pint
+from . import (
+    raise_if_dask_computes,
+    requires_cftime,
+    requires_pint,
+    requires_pooch,
+    requires_pyproj,
+    requires_regex,
+    requires_rich,
+    requires_scipy,
+)
 
 mpl.use("Agg")
 
@@ -39,6 +58,8 @@ datasets = [airds, airds.chunk({"lat": 5})]
 dataarrays = [airds.air, airds.air.chunk({"lat": 5})]
 objects = datasets + dataarrays
 
+xr.set_options(use_flox=False)
+
 
 def assert_dicts_identical(dict1, dict2):
     assert dict1.keys() == dict2.keys()
@@ -46,38 +67,44 @@ def assert_dicts_identical(dict1, dict2):
         assert_identical(dict1[k], dict2[k])
 
 
-def test_repr():
+def test_repr() -> None:
+    assert "air_temperature: [(1, 2, 3)]" in ds_with_tuple.cf.__repr__()
+
     # Dataset.
     # Stars: axes, coords, and std names
     actual = airds.cf.__repr__()
     expected = """\
     Coordinates:
-    - CF Axes: * X: ['lon']
-               * Y: ['lat']
-               * T: ['time']
-                 Z: n/a
+                 CF Axes: * X: ['lon']
+                          * Y: ['lat']
+                          * T: ['time']
+                            Z: n/a
 
-    - CF Coordinates: * longitude: ['lon']
-                      * latitude: ['lat']
-                      * time: ['time']
-                        vertical: n/a
+          CF Coordinates: * longitude: ['lon']
+                          * latitude: ['lat']
+                          * time: ['time']
+                            vertical: n/a
 
-    - Cell Measures:   area: ['cell_area']
-                       volume: n/a
+           Cell Measures:   area: ['cell_area']
+                            volume: n/a
 
-    - Standard Names: * latitude: ['lat']
-                      * longitude: ['lon']
-                      * time: ['time']
+          Standard Names: * latitude: ['lat']
+                          * longitude: ['lon']
+                          * time: ['time']
 
-    - Bounds:   n/a
+                  Bounds:   n/a
+
+           Grid Mappings:   n/a
 
     Data Variables:
-    - Cell Measures:   area, volume: n/a
+           Cell Measures:   area, volume: n/a
 
-    - Standard Names:   air_temperature: ['air']
+          Standard Names:   air_temperature: ['air']
 
-    - Bounds:   n/a
-    """
+                  Bounds:   n/a
+
+           Grid Mappings:   n/a"""
+
     assert actual == dedent(expected)
 
     # DataArray (Coordinates section same as Dataset)
@@ -85,118 +112,133 @@ def test_repr():
     actual = airds["air"].cf.__repr__()
     expected = """\
     Coordinates:
-    - CF Axes: * X: ['lon']
-               * Y: ['lat']
-               * T: ['time']
-                 Z: n/a
+                 CF Axes: * X: ['lon']
+                          * Y: ['lat']
+                          * T: ['time']
+                            Z: n/a
 
-    - CF Coordinates: * longitude: ['lon']
-                      * latitude: ['lat']
-                      * time: ['time']
-                        vertical: n/a
+          CF Coordinates: * longitude: ['lon']
+                          * latitude: ['lat']
+                          * time: ['time']
+                            vertical: n/a
 
-    - Cell Measures:   area: ['cell_area']
-                       volume: n/a
+           Cell Measures:   area: ['cell_area']
+                            volume: n/a
 
-    - Standard Names: * latitude: ['lat']
-                      * longitude: ['lon']
-                      * time: ['time']
+          Standard Names: * latitude: ['lat']
+                          * longitude: ['lon']
+                          * time: ['time']
 
-    - Bounds:   n/a
-    """
+                  Bounds:   n/a
+
+           Grid Mappings:   n/a"""
     assert actual == dedent(expected)
 
     # Empty Standard Names
     actual = popds.cf.__repr__()
     expected = """\
     Coordinates:
-    - CF Axes: * X: ['nlon']
-               * Y: ['nlat']
-                 Z, T: n/a
+                 CF Axes: * X: ['nlon']
+                          * Y: ['nlat']
+                            Z, T: n/a
 
-    - CF Coordinates:   longitude: ['TLONG', 'ULONG']
-                        latitude: ['TLAT', 'ULAT']
-                        vertical, time: n/a
+          CF Coordinates:   longitude: ['TLONG', 'ULONG']
+                            latitude: ['TLAT', 'ULAT']
+                            vertical, time: n/a
 
-    - Cell Measures:   area, volume: n/a
+           Cell Measures:   area, volume: n/a
 
-    - Standard Names:   n/a
+          Standard Names:   n/a
 
-    - Bounds:   n/a
+                  Bounds:   n/a
+
+           Grid Mappings:   n/a
 
     Data Variables:
-    - Cell Measures:   area, volume: n/a
+           Cell Measures:   area, volume: n/a
 
-    - Standard Names:   sea_water_potential_temperature: ['TEMP']
-                        sea_water_x_velocity: ['UVEL']
+          Standard Names:   sea_water_potential_temperature: ['TEMP']
+                            sea_water_x_velocity: ['UVEL']
 
-    - Bounds:   n/a
-    """
+                  Bounds:   n/a
+
+           Grid Mappings:   n/a"""
     assert actual == dedent(expected)
 
     # Flag DataArray
-    assert "CF Flag variable" in repr(basin.cf)
+    assert "Flag Variable" in repr(flag_excl.cf)
+    assert "Flag Variable" in repr(flag_indep.cf)
+    assert "Flag Variable" in repr(flag_indep_uint16.cf)
+    assert "Flag Variable" in repr(flag_mix.cf)
+    assert "Flag Variable" in repr(basin.cf)
 
     # "Temp" dataset
     actual = airds["air"]._to_temp_dataset().cf.__repr__()
     expected = """\
     Coordinates:
-    - CF Axes: * X: ['lon']
-               * Y: ['lat']
-               * T: ['time']
-                 Z: n/a
+                 CF Axes: * X: ['lon']
+                          * Y: ['lat']
+                          * T: ['time']
+                            Z: n/a
 
-    - CF Coordinates: * longitude: ['lon']
-                      * latitude: ['lat']
-                      * time: ['time']
-                        vertical: n/a
+          CF Coordinates: * longitude: ['lon']
+                          * latitude: ['lat']
+                          * time: ['time']
+                            vertical: n/a
 
-    - Cell Measures:   area: ['cell_area']
-                       volume: n/a
+           Cell Measures:   area: ['cell_area']
+                            volume: n/a
 
-    - Standard Names: * latitude: ['lat']
-                      * longitude: ['lon']
-                      * time: ['time']
+          Standard Names: * latitude: ['lat']
+                          * longitude: ['lon']
+                          * time: ['time']
 
-    - Bounds:   n/a
+                  Bounds:   n/a
+
+           Grid Mappings:   n/a
 
     Data Variables:
-    - Cell Measures:   area, volume: n/a
+           Cell Measures:   area, volume: n/a
 
-    - Standard Names:   air_temperature: [<this-array>]
+          Standard Names:   air_temperature: [<this-array>]
 
-    - Bounds:   n/a
-    """
+                  Bounds:   n/a
+
+           Grid Mappings:   n/a"""
     assert actual == dedent(expected)
 
     # CF roles
     actual = dsg.cf.__repr__()
-    expected = """
-    - CF Roles: * profile_id: ['profile']
-                * trajectory_id: ['trajectory']
+    expected = """\
+    Discrete Sampling Geometry:
+                CF Roles: * profile_id: ['profile']
+                          * trajectory_id: ['trajectory']
 
     Coordinates:
-    - CF Axes:   X, Y, Z, T: n/a
+                 CF Axes:   X, Y, Z, T: n/a
 
-    - CF Coordinates:   longitude, latitude, vertical, time: n/a
+          CF Coordinates:   longitude, latitude, vertical, time: n/a
 
-    - Cell Measures:   area, volume: n/a
+           Cell Measures:   area, volume: n/a
 
-    - Standard Names:   n/a
+          Standard Names:   n/a
 
-    - Bounds:   n/a
+                  Bounds:   n/a
+
+           Grid Mappings:   n/a
 
     Data Variables:
-    - Cell Measures:   area, volume: n/a
+           Cell Measures:   area, volume: n/a
 
-    - Standard Names:   n/a
+          Standard Names:   n/a
 
-    - Bounds:   n/a
-    """
+                  Bounds:   n/a
+
+           Grid Mappings:   n/a"""
     assert actual == dedent(expected)
 
 
-def test_axes():
+def test_axes() -> None:
     expected = dict(T=["time"], X=["lon"], Y=["lat"])
     actual = airds.cf.axes
     assert actual == expected
@@ -206,7 +248,7 @@ def test_axes():
     assert actual == expected
 
 
-def test_coordinates():
+def test_coordinates() -> None:
     expected = dict(latitude=["lat"], longitude=["lon"], time=["time"])
     actual = airds.cf.coordinates
     assert actual == expected
@@ -217,7 +259,7 @@ def test_coordinates():
 
 
 @requires_pint
-def test_coordinates_quantified():
+def test_coordinates_quantified() -> None:
     # note: import order is important
     from .. import units  # noqa
 
@@ -229,8 +271,8 @@ def test_coordinates_quantified():
     )
 
 
-def test_cell_measures():
-    ds = airds.copy(deep=True)
+def test_cell_measures() -> None:
+    ds = airds.copy(deep=False)
     ds["foo"] = xr.DataArray(ds["cell_area"], attrs=dict(standard_name="foo_std_name"))
     ds["air"].attrs["cell_measures"] += " foo_measure: foo"
     assert ("foo_std_name" in ds.cf["air_temperature"].cf) and ("foo_measure" in ds.cf)
@@ -247,21 +289,22 @@ def test_cell_measures():
 
     # Additional cell measure in repr
     actual = ds.cf.__repr__()
-    expected = """\
+    expected_repr = """\
     Data Variables:
-    - Cell Measures:   foo_measure: ['foo']
-                       volume: ['foo']
-                       area: n/a
+           Cell Measures:   foo_measure: ['foo']
+                            volume: ['foo']
+                            area: n/a
 
-    - Standard Names:   air_temperature: ['air']
-                        foo_std_name: ['foo']
+          Standard Names:   air_temperature: ['air']
+                            foo_std_name: ['foo']
 
-    - Bounds:   n/a
-    """
-    assert actual.endswith(dedent(expected))
+                  Bounds:   n/a
+
+           Grid Mappings:   n/a"""
+    assert actual.endswith(dedent(expected_repr))
 
 
-def test_standard_names():
+def test_standard_names() -> None:
     expected = dict(
         air_temperature=["air"], latitude=["lat"], longitude=["lon"], time=["time"]
     )
@@ -274,14 +317,14 @@ def test_standard_names():
     assert dsnew.cf.standard_names == dict(a=["a", "b"])
 
 
-def test_drop_bounds():
+def test_drop_bounds() -> None:
     assert ambig.cf["latitude"].name == "lat"
     assert ambig.cf["longitude"].name == "lon"
     assert ambig.cf.bounds["latitude"] == ["vertices_latitude"]
     assert ambig.cf.bounds["longitude"] == ["vertices_longitude"]
 
 
-def test_accessor_getattr_and_describe():
+def test_accessor_getattr_and_describe() -> None:
     ds_verta = vert.set_coords(
         (
             "ps",
@@ -295,10 +338,19 @@ def test_accessor_getattr_and_describe():
     assert ds_verta.cf.formula_terms == ds_vertb.cf.formula_terms
     assert ds_verta.o3.cf.formula_terms == ds_vertb.o3.cf.formula_terms
     assert ds_verta.cf.bounds == ds_vertb.cf.bounds
+    assert ds_verta.cf.grid_mapping_names == ds_vertb.cf.grid_mapping_names
     assert str(ds_verta.cf) == str(ds_vertb.cf)
 
 
-def test_getitem_standard_name():
+def test_accessor_getattr_coordinate_Nonetype() -> None:
+    ds_vert = vert
+    ds_vert["o3"].encoding["coordinates"] = None
+    assert ds_vert.o3.cf["latitude"].name == "lat"
+    ds_vert["lat"].encoding["coordinates"] = None
+    assert ds_vert.cf["latitude"].name == "lat"
+
+
+def test_getitem_standard_name() -> None:
     actual = airds.cf["air_temperature"]
     expected = airds["air"]
     assert_identical(actual, expected)
@@ -307,19 +359,19 @@ def test_getitem_standard_name():
     expected = airds["lat"]
     assert_identical(actual, expected)
 
-    ds = airds.copy(deep=True)
+    ds = airds.copy(deep=False)
     ds["air2"] = ds.air
     with pytest.raises(KeyError):
         ds.cf["air_temperature"]
     actual = ds.cf[["air_temperature"]]
-    expected = ds[["air", "air2"]]
-    assert_identical(actual, expected)
+    expected_ds = ds[["air", "air2"]]
+    assert_identical(actual, expected_ds)
 
     with pytest.raises(KeyError):
         ds.air.cf["air_temperature"]
 
 
-def test_getitem_ancillary_variables():
+def test_getitem_ancillary_variables() -> None:
     expected = anc.set_coords(["q_error_limit", "q_detection_limit"])["q"]
     assert_identical(anc.cf["q"], expected)
     assert_identical(anc.cf["specific_humidity"], expected)
@@ -327,10 +379,10 @@ def test_getitem_ancillary_variables():
     with pytest.warns(UserWarning):
         anc[["q"]].cf["q"]
 
-    with pytest.warns(None) as record:
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
         with cf_xarray.set_options(warn_on_missing_variables=False):
             anc[["q"]].cf["q"]
-            assert len(record) == 0
 
     for k in ["ULONG", "ULAT"]:
         assert k not in popds.cf["TEMP"].coords
@@ -339,20 +391,19 @@ def test_getitem_ancillary_variables():
         assert k not in popds.cf["UVEL"].coords
 
 
-def test_rename_like():
-    original = popds.copy(deep=True)
-
+def test_rename_like() -> None:
     # it'll match for axis: X (lon, nlon) and coordinate="longitude" (lon, TLONG)
     # so delete the axis attributes
-    newair = airds.copy(deep=True)
+    original = popds
+    newair = airds.copy(deep=False)
     del newair.lon.attrs["axis"]
     del newair.lat.attrs["axis"]
 
     renamed = popds.cf["TEMP"].cf.rename_like(newair)
-    for k in ["TLONG", "TLAT"]:
-        assert k not in renamed.coords
-        assert k in original.coords
     assert original.TEMP.attrs["coordinates"] == "TLONG TLAT"
+    for k in ["TLONG", "TLAT"]:
+        assert k in original.coords
+        assert k not in renamed.coords
 
     assert "lon" in renamed.coords
     assert "lat" in renamed.coords
@@ -396,12 +447,15 @@ def test_rename_like():
     renamed = airds.cf["air"].cf.rename_like(other)
     assert renamed.cf.cell_measures["area"] == ["CELL_AREA"]
 
+    renamed = ds_with_tuple.cf.rename_like(airds)
+    assert renamed.identical(airds)
+
 
 @pytest.mark.parametrize("obj", objects)
 @pytest.mark.parametrize(
     "attr, xrkwargs, cfkwargs",
     (
-        ("resample", {"time": "M"}, {"T": "M"}),
+        ("resample", {"time": "ME"}, {"T": "ME"}),
         ("rolling", {"lat": 5}, {"Y": 5}),
         ("groupby", {"group": "time"}, {"group": "T"}),
         ("groupby", {"group": "time.month"}, {"group": "T.month"}),
@@ -410,7 +464,6 @@ def test_rename_like():
     ),
 )
 def test_wrapped_classes(obj, attr, xrkwargs, cfkwargs):
-
     if attr in ("rolling", "coarsen"):
         # TODO: xarray bug, rolling and coarsen don't accept ellipsis
         args = ()
@@ -464,7 +517,43 @@ def test_kwargs_methods(obj):
     assert_identical(expected, actual)
 
 
-def test_pos_args_methods():
+@pytest.mark.parametrize("obj", objects)
+def test_dictionary_indexing(obj):
+    with raise_if_dask_computes():
+        expected = obj.isel(time=0)
+        actual = obj.cf[{"T": 0}]
+    assert_identical(expected, actual)
+
+
+@pytest.mark.parametrize("obj", objects)
+def test_loc_indexing(obj):
+    label = obj.time.values[0]
+    with raise_if_dask_computes():
+        expected = obj.loc[{"time": label}]
+        actual = obj.cf.loc[{"T": label}]
+    assert_identical(expected, actual)
+
+
+@pytest.mark.parametrize("obj", objects)
+def test_loc_assignment(obj):
+    expected = obj.copy()
+    actual = obj.copy()
+    label = obj.time.values[0]
+
+    expected.loc[{"time": label}] = -1
+    actual.cf.loc[{"T": label}] = -1
+
+    assert_identical(expected, actual)
+
+
+def test_dictionary_indexing_expands_multiple_dimensions():
+    expected = multiple.isel(x1=5, x2=5)
+    actual = multiple.cf[{"X": 5}]
+
+    assert_identical(expected, actual)
+
+
+def test_pos_args_methods() -> None:
     expected = airds.transpose("lon", "time", "lat")
     actual = airds.cf.transpose("longitude", "T", "latitude")
     assert_identical(actual, expected)
@@ -477,17 +566,15 @@ def test_pos_args_methods():
     assert_identical(actual, expected)
 
 
-def test_preserve_unused_keys():
-
-    ds = airds.copy(deep=True)
+def test_preserve_unused_keys() -> None:
+    ds = airds.copy(deep=False)
     ds.time.attrs.clear()
     actual = ds.cf.sel(X=260, Y=40, time=airds.time[:2], method="nearest")
     expected = ds.sel(lon=260, lat=40, time=airds.time[:2], method="nearest")
     assert_identical(actual, expected)
 
 
-def test_kwargs_expand_key_to_multiple_keys():
-
+def test_kwargs_expand_key_to_multiple_keys() -> None:
     actual = multiple.cf.isel(X=5, Y=3)
     expected = multiple.isel(x1=5, y1=3, x2=5, y2=3)
     assert_identical(actual, expected)
@@ -526,9 +613,8 @@ def test_args_methods(obj):
     assert_identical(expected, actual)
 
 
-def test_dataarray_getitem():
-
-    air = airds.air.copy()
+def test_dataarray_getitem() -> None:
+    air = airds.air.copy(deep=False)
     air.name = None
 
     assert_identical(air.cf["longitude"], air["lon"])
@@ -541,12 +627,12 @@ def test_dataarray_getitem():
     assert_identical(air.cf["area_grid_cell"], air.cell_area.reset_coords(drop=True))
 
 
-def test_dataarray_plot():
-
-    obj = airds.air.copy(deep=True)
+def test_dataarray_plot() -> None:
+    obj = airds.air.copy(deep=False)
 
     rv = obj.isel(time=1).transpose("lon", "lat").cf.plot()
     assert isinstance(rv, mpl.collections.QuadMesh)
+    assert rv.axes is not None
     assert all(v > 180 for v in rv.axes.get_xlim())
     assert all(v < 200 for v in rv.axes.get_ylim())
     plt.close()
@@ -636,15 +722,17 @@ def test_getitem(obj, key, expected_key):
 def test_getitem_errors(obj):
     with pytest.raises(KeyError):
         obj.cf["XX"]
-    obj2 = obj.copy(deep=True)
+    obj2 = obj.copy(deep=False)
     obj2.lon.attrs = {}
     with pytest.raises(KeyError):
         obj2.cf["X"]
 
 
-def test_bad_cell_measures_attribute():
-    air2 = airds.copy(deep=True)
+def test_bad_cell_measures_attribute() -> None:
+    air2 = airds.copy(deep=False)
     air2.air.attrs["cell_measures"] = "--OPT"
+    with pytest.warns(UserWarning):
+        air2.cf["air"]
     with pytest.warns(UserWarning):
         assert_identical(air2.air.drop_vars("cell_area"), air2.cf["air"])
     with pytest.warns(UserWarning):
@@ -659,8 +747,14 @@ def test_bad_cell_measures_attribute():
     #  GH216
     repr(air2.cf)
 
+    # GH340
+    air2.cf.axes
+    air2.cf.coordinates
+    with pytest.warns(UserWarning):
+        air2.cf.cell_measures
 
-def test_getitem_clash_standard_name():
+
+def test_getitem_clash_standard_name() -> None:
     ds = xr.Dataset()
     ds.coords["area"] = xr.DataArray(np.ones(10), attrs={"standard_name": "cell_area"})
     assert_identical(ds.cf["cell_area"], ds["area"].reset_coords(drop=True))
@@ -690,7 +784,7 @@ def test_getitem_clash_standard_name():
     assert_identical(ds["lat"], ds.cf["latitude"])
 
 
-def test_getitem_uses_coordinates():
+def test_getitem_uses_coordinates() -> None:
     # POP-like dataset
     ds = popds
     assert_identical(
@@ -705,7 +799,7 @@ def test_getitem_uses_coordinates():
     assert_identical(ds.TEMP.cf["latitude"], ds["TLAT"].reset_coords(drop=True))
 
 
-def test_getitem_uses_dimension_names_when_coordinates_attr():
+def test_getitem_uses_dimension_names_when_coordinates_attr() -> None:
     # POP-like dataset
     ds = popds
     assert_identical(ds.cf["X"], ds["nlon"])
@@ -714,7 +808,7 @@ def test_getitem_uses_dimension_names_when_coordinates_attr():
     assert_identical(ds.TEMP.cf["Y"], ds["nlat"])
 
 
-def test_plot_xincrease_yincrease():
+def test_plot_xincrease_yincrease() -> None:
     ds = xr.tutorial.open_dataset("air_temperature").isel(time=slice(4), lon=slice(50))
     ds.lon.attrs["positive"] = "down"
     ds.lat.attrs["positive"] = "down"
@@ -728,20 +822,21 @@ def test_plot_xincrease_yincrease():
 
 @pytest.mark.parametrize("dims", ["time2", "lat", "time", ["lat", "lon"]])
 def test_add_bounds(dims):
-    obj = airds.copy(deep=True)
+    ds = airds
+    original = ds.copy(deep=True)
 
     expected = {}
     expected["lat"] = xr.concat(
         [
-            obj.lat.copy(data=np.arange(76.25, 16.0, -2.5)),
-            obj.lat.copy(data=np.arange(73.75, 13.6, -2.5)),
+            ds.lat.copy(data=np.arange(76.25, 16.0, -2.5)),
+            ds.lat.copy(data=np.arange(73.75, 13.6, -2.5)),
         ],
         dim="bounds",
     )
     expected["lon"] = xr.concat(
         [
-            obj.lon.copy(data=np.arange(198.75, 325 - 1.25, 2.5)),
-            obj.lon.copy(data=np.arange(201.25, 325 + 1.25, 2.5)),
+            ds.lon.copy(data=np.arange(198.75, 325 - 1.25, 2.5)),
+            ds.lon.copy(data=np.arange(201.25, 325 + 1.25, 2.5)),
         ],
         dim="bounds",
     )
@@ -751,8 +846,8 @@ def test_add_bounds(dims):
     dtb2 = pd.Timedelta("3h")
     expected["time"] = xr.concat(
         [
-            obj.time.copy(data=pd.date_range(start=t0 - dtb2, end=t1 - dtb2, freq=dt)),
-            obj.time.copy(data=pd.date_range(start=t0 + dtb2, end=t1 + dtb2, freq=dt)),
+            ds.time.copy(data=pd.date_range(start=t0 - dtb2, end=t1 - dtb2, freq=dt)),
+            ds.time.copy(data=pd.date_range(start=t0 + dtb2, end=t1 + dtb2, freq=dt)),
         ],
         dim="bounds",
     )
@@ -761,8 +856,9 @@ def test_add_bounds(dims):
     expected["lon"].attrs.clear()
     expected["time"].attrs.clear()
 
-    obj.coords["time2"] = obj.time
-    added = obj.cf.add_bounds(dims)
+    added = ds.copy(deep=False)
+    added.coords["time2"] = ds.time
+    added = added.cf.add_bounds(dims)
     if isinstance(dims, str):
         dims = (dims,)
 
@@ -770,17 +866,120 @@ def test_add_bounds(dims):
         name = f"{dim}_bounds"
         assert name in added.coords
         assert added[dim].attrs["bounds"] == name
-        assert_allclose(added[name].reset_coords(drop=True), expected[dim])
+        assert_allclose(
+            added[name].reset_coords(drop=True), expected[dim].transpose(..., "bounds")
+        )
+        if dim == "lat":
+            # The CF axes shouldn't have changed
+            assert added.cf.axes["Y"] == ["lat"]
+
+    _check_unchanged(original, ds)
 
 
-def test_add_bounds_multiple():
+def test_add_bounds_preserves_array_type() -> None:
+    # Test that the array type of the bounds variable is the same as the original variable.
+    ds = airds
+    original = ds.copy(deep=True)
+    ds = ds.drop_indexes("lat").rename_dims(lat="x")
+    ds["lat"] = ds.lat.copy(data=dask.array.asarray(ds.lat.data))
+    added = ds.cf.add_bounds("lat")
+
+    assert isinstance(added.lat.data, dask.array.Array)
+    assert isinstance(added.lat_bounds.data, dask.array.Array)
+
+    assert isinstance(ds.lat.data, dask.array.Array)
+    _check_unchanged(original, ds)
+
+
+def test_add_irregularly_spaced_bounds_do_not_overlap() -> None:
+    # Test that added bounds with irregular spacing do not overlap.
+    ds = airds
+    original = ds.copy(deep=True)
+    ds["time"] = ds["time"].copy(data=pd.date_range("2013-01", "2013-04", freq="MS"))
+    expected = xr.DataArray(
+        data=[
+            pd.to_datetime(t)
+            for t in [
+                ["2012-12-16T12", "2013-01-16T12"],
+                ["2013-01-16T12", "2013-02-15T00"],
+                ["2013-02-15T00", "2013-03-16T12"],
+                ["2013-03-16T12", "2013-04-16T12"],
+            ]
+        ],
+        dims=["time", "bounds"],
+        name="time_bounds",
+        coords={"time": ds.time.data},
+    )
+    added = ds.copy(deep=False)
+    added = added.cf.add_bounds("time")
+
+    name = "time_bounds"
+    assert name in added.coords
+    assert added["time"].attrs["bounds"] == name
+    assert_allclose(added[name].reset_coords(drop=True), expected)
+
+    _check_unchanged(original, ds)
+
+
+def test_add_bounds_multiple() -> None:
     # Test multiple dimensions
     assert not {"x1_bounds", "x2_bounds"} <= set(multiple.variables)
     assert {"x1_bounds", "x2_bounds"} <= set(multiple.cf.add_bounds("X").variables)
 
 
-def test_bounds():
-    ds = airds.copy(deep=True).cf.add_bounds("lat")
+def test_add_bounds_nd_variable() -> None:
+    ds = xr.Dataset(
+        {"z": (("x", "y"), np.arange(12).reshape(4, 3))},
+        coords={"x": np.arange(4), "y": np.arange(3)},
+    )
+
+    # 2D
+    expected = (
+        vertices_to_bounds(
+            xr.DataArray(
+                np.arange(0, 13, 3).reshape(5, 1) + np.arange(-2, 2).reshape(1, 4),
+                dims=("x", "y"),
+            ),
+            out_dims=("bounds", "x", "y"),
+        )
+        .rename("z_bounds")
+        .assign_coords(**ds.coords)  # type: ignore[arg-type]
+    )
+    actual = ds.cf.add_bounds("z").z_bounds.reset_coords(drop=True)
+    xr.testing.assert_identical(actual, expected)
+
+    # 2D rotated ds
+    lon_bounds = (
+        rotds.drop_vars(["lon_bounds"])
+        .assign(x=rotds.cf["X"], y=rotds.cf["Y"])
+        .cf.add_bounds(["lon"])
+        .lon_bounds
+    )
+    # upper left of cell must be the EXACT same as the lower left of the cell above
+    assert lon_bounds[0, 1, 1] == lon_bounds[0, 2, 0]
+    # upper right of cell must be the EXACT same as the lower right of the cell above
+    assert lon_bounds[0, 1, 2] == lon_bounds[0, 2, 3]
+
+    # 1D
+    expected = (
+        xr.concat([ds.z - 1.5, ds.z + 1.5], dim="bounds")
+        .rename("z_bounds")
+        .transpose(..., "bounds")
+    )
+
+    actual = ds.cf.add_bounds("z", dim="x").z_bounds.reset_coords(drop=True)
+    xr.testing.assert_identical(expected, actual)
+
+    # Requesting bounds on a non-variable dimension
+    with pytest.raises(ValueError, match="are dimensions with no index."):
+        ds.drop_vars("x").cf.add_bounds("x")
+
+    with pytest.raises(ValueError, match="The `bounds` dimension already exists"):
+        ds.cf.add_bounds("z").cf.add_bounds("x")
+
+
+def test_bounds() -> None:
+    ds = airds.copy(deep=False).cf.add_bounds("lat")
 
     actual = ds.cf.bounds
     expected = {"Y": ["lat_bounds"], "lat": ["lat_bounds"], "latitude": ["lat_bounds"]}
@@ -806,62 +1005,598 @@ def test_bounds():
     # Do not attempt to get bounds when extracting a DataArray
     # raise a warning when extracting a Dataset and bounds do not exists
     ds["time"].attrs["bounds"] = "foo"
-    with pytest.warns(None) as record:
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
         ds.cf["air"]
-    assert len(record) == 0
+
     with pytest.warns(UserWarning, match="{'foo'} not found in object"):
         ds.cf[["air"]]
 
     # Dataset has bounds
-    expected = """\
-    - Bounds:   Y: ['lat_bounds']
-                lat: ['lat_bounds']
-                latitude: ['lat_bounds']
-    """
-    assert dedent(expected) in ds.cf.__repr__()
+    expected_repr = """\
+              Bounds:   Y: ['lat_bounds']
+                        lat: ['lat_bounds']
+                        latitude: ['lat_bounds']"""
+    assert expected_repr in ds.cf.__repr__()
 
     # DataArray does not have bounds
-    expected = airds.cf["air"].cf.__repr__()
+    expected_repr = airds.cf["air"].cf.__repr__()
     actual = ds.cf["air"].cf.__repr__()
-    assert actual == expected
+    assert actual == expected_repr
 
 
-def test_bounds_to_vertices():
+def test_bounds_to_vertices() -> None:
     # All available
-    ds = airds.cf.add_bounds(["lon", "lat"])
-    dsc = ds.cf.bounds_to_vertices()
-    assert "lon_vertices" in dsc
-    assert "lat_vertices" in dsc
+    ds = airds
+    original = ds.copy(deep=True)
+    dsb = ds.cf.add_bounds(["lon", "lat"])
+    dsv = dsb.cf.bounds_to_vertices()
+    assert "lon_vertices" in dsv
+    assert "lat_vertices" in dsv
 
     # Giving key
-    dsc = ds.cf.bounds_to_vertices("longitude")
-    assert "lon_vertices" in dsc
-    assert "lat_vertices" not in dsc
+    dsv = dsb.cf.bounds_to_vertices("longitude")
+    assert "lon_vertices" in dsv
+    assert "lat_vertices" not in dsv
 
-    dsc = ds.cf.bounds_to_vertices(["longitude", "latitude"])
-    assert "lon_vertices" in dsc
-    assert "lat_vertices" in dsc
+    dsv = dsb.cf.bounds_to_vertices(["longitude", "latitude"])
+    assert "lon_vertices" in dsv
+    assert "lat_vertices" in dsv
 
     # Error
     with pytest.raises(ValueError):
-        dsc = ds.cf.bounds_to_vertices("T")
+        dsv = dsb.cf.bounds_to_vertices("T")
 
     # Words on datetime arrays to
-    ds = airds.cf.add_bounds("time")
-    dsc = ds.cf.bounds_to_vertices()
-    assert "time_bounds" in dsc
+    dsb = dsb.cf.add_bounds("time")
+    dsv = dsb.cf.bounds_to_vertices()
+    assert "time_bounds" in dsv
+
+    _check_unchanged(original, ds)
 
 
-def test_get_bounds_dim_name():
-    ds = airds.copy(deep=True).cf.add_bounds("lat")
+def test_get_bounds_dim_name() -> None:
+    ds = airds.cf.add_bounds("lat")
     assert ds.cf.get_bounds_dim_name("latitude") == "bounds"
     assert ds.cf.get_bounds_dim_name("lat") == "bounds"
 
     assert mollwds.cf.get_bounds_dim_name("longitude") == "bounds"
     assert mollwds.cf.get_bounds_dim_name("lon") == "bounds"
 
+    # Be OK with bounds and coordinates having same attributes
+    # GH442
+    assert vert.cf.get_bounds_dim_name("longitude") == "bnds"
+    ds = vert.copy(deep=True)
+    ds.lat.attrs["standard_name"] = "longitude"
+    with pytest.raises(KeyError):
+        ds.cf.get_bounds_dim_name("longitude")
 
-def test_docstring():
+
+@requires_pyproj
+def test_grid_mappings():
+    ds = rotds.copy(deep=False)
+
+    actual = ds.cf.grid_mapping_names
+    expected = {"rotated_latitude_longitude": ["rotated_pole"]}
+    assert actual == expected
+
+    expected = ds.rotated_pole
+    actual = ds.cf["rotated_latitude_longitude"]
+    assert_identical(actual, expected)
+
+    expected = ds.rotated_pole
+    actual = ds.cf["grid_mapping"]
+    assert_identical(actual, expected)
+
+    # Propagation
+    actual = ds.cf[["temp"]]
+    assert "rotated_pole" in actual.coords
+
+    actual = ds.cf["temp"]
+    assert "rotated_pole" in actual.coords
+
+    actual = ds.cf["temp"].cf["grid_mapping"]
+    assert_identical(actual, expected)
+
+    actual = ds.cf["temp"].coords["rotated_pole"].drop_vars("rotated_pole")
+    assert_identical(actual, expected)
+
+    actual = ds.cf["temp"].cf["rotated_latitude_longitude"]
+    assert_identical(actual, expected)
+
+    # not properly propagated if grid mapping variable not in coords
+    with pytest.raises(ValueError, match="No 'grid_mapping' attribute present."):
+        ds.temp.cf.grid_mapping_name
+
+    # check for https://github.com/xarray-contrib/cf-xarray/issues/448
+    expected = ds.rlon
+    actual = rotds.temp.cf["X"]
+    assert_identical(expected, actual)
+
+    # Test repr
+    expected = """\
+           Grid Mappings:   rotated_latitude_longitude: ['rotated_pole']"""
+    assert dedent(expected) in ds.cf.__repr__()
+    # assert dedent(expected) in ds.cf["temp"].cf.__repr__()
+
+    # grid_mapping_name
+    assert ds.cf["temp"].cf.grid_mapping_name == "rotated_latitude_longitude"
+
+    # Test .grid_mappings property with single grid mapping
+    grid_mappings = ds.cf.grid_mappings
+    assert len(grid_mappings) == 1
+    gm = grid_mappings[0]
+    assert gm.name == "rotated_latitude_longitude"
+    assert gm.array.name == "rotated_pole"
+    assert gm.array.shape == ()  # scalar variable
+    assert isinstance(gm.coordinates, tuple)
+    # Should have rlon and rlat detected from standard names
+    assert gm.coordinates == ("rlon", "rlat")
+
+    # Test .grid_mappings property on DataArray with propagated coords
+    da_grid_mappings = ds.cf["temp"].cf.grid_mappings
+    assert len(da_grid_mappings) == 1
+    da_gm = da_grid_mappings[0]
+    assert da_gm.name == "rotated_latitude_longitude"
+    assert da_gm.array.name == "rotated_pole"
+    # Should also detect rlon and rlat from standard names
+    assert da_gm.coordinates == ("rlon", "rlat")
+
+    # what if there are really 2 grid mappins?
+    ds["temp2"] = ds.temp
+    ds["temp2"].attrs["grid_mapping"] = "rotated_pole2"
+    ds["rotated_pole2"] = ds.rotated_pole
+    expected = """\
+           Grid Mappings:   rotated_latitude_longitude: ['rotated_pole', 'rotated_pole2']"""
+    assert dedent(expected) in ds.cf.__repr__()
+
+    with pytest.raises(KeyError):
+        ds.cf["grid_mapping"]
+
+    assert "rotated_latitude_longitude" in ds.cf.keys()
+
+    with pytest.raises(KeyError):
+        ds.cf["grid_mapping"]
+    actual = ds.cf[["grid_mapping"]]
+    expected = ds[["rotated_pole", "rotated_pole2"]].reset_coords()
+    assert_identical(expected, actual)
+
+    expected = ds.rotated_pole
+    actual = ds.cf["temp"].cf["grid_mapping"]
+    assert_identical(actual, expected)
+    expected = ds.rotated_pole2
+    actual = ds.cf["temp2"].cf["grid_mapping"]
+    assert_identical(actual, expected)
+
+    # test _get_all with grid_mapping_var mapper
+    ds = ds.cf.set_coords("grid_mapping")
+    assert "rotated_pole" in ds.coords
+
+
+@requires_pyproj
+def test_multiple_grid_mapping_attribute():
+    from ..datasets import hrrrds as ds
+
+    # Test Dataset grid_mapping_names
+    # Now includes British National Grid (EPSG:27700) which has grid_mapping_name
+    assert ds.cf.grid_mapping_names == {
+        "latitude_longitude": ["crs_4326"],
+        "lambert_azimuthal_equal_area": ["spatial_ref"],
+        "transverse_mercator": ["crs_27700"],
+    }
+
+    # Test DataArray grid_mapping_names
+    da = ds.foo
+    # Now with improved regex parsing, all 3 grid mappings should be detected
+    assert da.cf.grid_mapping_names == {
+        "latitude_longitude": ["crs_4326"],
+        "lambert_azimuthal_equal_area": ["spatial_ref"],
+        "transverse_mercator": ["crs_27700"],
+    }
+
+    assert ds.cf.get_associated_variable_names("foo")["grid_mapping"] == [
+        "spatial_ref",
+        "crs_4326",
+        "crs_27700",
+    ]
+
+    # Test that grid_mapping_name raises an error with multiple mappings
+    with pytest.raises(
+        ValueError,
+        match="Multiple grid mappings found.*Please use DataArray.cf.grid_mapping_names",
+    ):
+        da.cf.grid_mapping_name
+
+    assert "crs_4326" in ds.cf["foo"].coords
+    assert "spatial_ref" in ds.cf["foo"].coords
+    assert "crs_27700" in ds.cf["foo"].coords
+    # Also check that coordinate variables are included
+    assert "latitude" in ds.cf["foo"].coords
+    assert "longitude" in ds.cf["foo"].coords
+    assert "x27700" in ds.cf["foo"].coords
+    assert "y27700" in ds.cf["foo"].coords
+
+    # Test that accessing grid_mapping with cf indexing raises an error for multiple mappings
+    with pytest.raises(
+        KeyError, match="Receive multiple variables for key 'grid_mapping'"
+    ):
+        da.cf["grid_mapping"]
+
+    # Test that DataArrays don't support list indexing
+    with pytest.raises(
+        KeyError, match="Cannot use an Iterable of keys with DataArrays"
+    ):
+        da.cf[["grid_mapping"]]
+
+    # But Dataset should support list indexing and return all grid mappings and coordinates
+    result = ds.cf[["foo", "grid_mapping"]]
+    assert "crs_4326" in result.coords
+    assert "spatial_ref" in result.coords
+    assert "crs_27700" in result.coords
+    assert "foo" in result.data_vars
+
+
+@requires_pyproj
+def test_grid_mappings_property():
+    """Test the .cf.grid_mappings property on both Dataset and DataArray."""
+    from ..datasets import hrrrds
+
+    ds = hrrrds
+
+    # Test Dataset
+    grid_mappings = ds.cf.grid_mappings
+    assert len(grid_mappings) == 3
+
+    # Check that all expected grid mapping names are present
+    gm_names = {gm.name for gm in grid_mappings}
+    expected_names = {
+        "latitude_longitude",
+        "lambert_azimuthal_equal_area",
+        "transverse_mercator",
+    }
+    assert gm_names == expected_names
+
+    # Test specific properties of each grid mapping
+    for gm in grid_mappings:
+        assert gm.crs is not None  # Should have pyproj CRS
+        assert isinstance(gm.array, xr.DataArray)  # Should be DataArray, not Variable
+        assert isinstance(gm.coordinates, tuple)
+        assert gm.array.name is not None  # DataArray should preserve name
+
+        # Check specific coordinate associations
+        if gm.name == "latitude_longitude":
+            assert gm.coordinates == ("latitude", "longitude")
+        elif gm.name == "transverse_mercator":
+            assert gm.coordinates == ("x27700", "y27700")
+        elif gm.name == "lambert_azimuthal_equal_area":
+            assert gm.coordinates == (
+                "x",
+                "y",
+            )  # Falls back to data variable dimensions
+
+    # Test DataArray
+    da = ds.foo
+    da_grid_mappings = da.cf.grid_mappings
+    assert len(da_grid_mappings) == 3
+
+    # DataArray should have the same grid mappings as Dataset
+    da_names = {gm.name for gm in da_grid_mappings}
+    assert da_names == expected_names
+
+    # Check that coordinates are populated for DataArray too
+    for gm in da_grid_mappings:
+        assert len(gm.coordinates) > 0  # Should never be empty now
+        if gm.name == "lambert_azimuthal_equal_area":
+            assert gm.coordinates == ("x", "y")
+
+
+@requires_pyproj
+def test_grid_mappings_crs_construction_is_cached(monkeypatch):
+    """``pyproj.CRS.from_cf`` is memoized per grid-mapping attrs.
+
+    Building the CRS re-parses the datum/ellipsoid on every call. A dataset
+    references the same grid mapping from many variables and the property may
+    be accessed repeatedly, so each distinct grid mapping should be built once.
+    """
+    import pyproj
+
+    from ..accessor import _crs_from_cf_attrs
+
+    _crs_from_cf_attrs.cache_clear()
+
+    from ..datasets import hrrrds
+
+    ds = hrrrds
+
+    calls = {"n": 0}
+    orig = pyproj.CRS.from_cf
+
+    def counting_from_cf(*args, **kwargs):
+        calls["n"] += 1
+        return orig(*args, **kwargs)
+
+    monkeypatch.setattr(pyproj.CRS, "from_cf", staticmethod(counting_from_cf))
+
+    # Repeated property accesses, including via a DataArray, must not rebuild
+    # the same CRS: hrrrds has 3 distinct grid mappings, each built once.
+    ds.cf.grid_mappings
+    ds.cf.grid_mappings
+    ds.foo.cf.grid_mappings
+
+    assert calls["n"] == 3
+
+    _crs_from_cf_attrs.cache_clear()
+
+
+@requires_pyproj
+def test_grid_mappings_coordinates_attribute():
+    """Test that coordinates attribute is always populated correctly for DataArray grid mappings."""
+    from ..datasets import hrrrds
+
+    ds = hrrrds
+
+    # Focus on DataArray access
+    da = ds.foo
+    grid_mappings = da.cf.grid_mappings
+    assert len(grid_mappings) == 3
+
+    # Verify order preservation for DataArray (should match grid_mapping attribute order)
+    expected_order = [
+        "lambert_azimuthal_equal_area",
+        "latitude_longitude",
+        "transverse_mercator",
+    ]
+    actual_order = [gm.name for gm in grid_mappings]
+    assert actual_order == expected_order, (
+        f"DataArray order {actual_order} doesn't match expected {expected_order}"
+    )
+
+    for gm in grid_mappings:
+        # Coordinates should never be empty
+        assert len(gm.coordinates) > 0, (
+            f"Grid mapping '{gm.name}' has empty coordinates"
+        )
+
+        # All coordinates should be strings
+        assert all(isinstance(coord, str) for coord in gm.coordinates), (
+            f"Grid mapping '{gm.name}' has non-string coordinates: {gm.coordinates}"
+        )
+
+        # Test specific expected coordinates for each grid mapping
+        if gm.name == "latitude_longitude":
+            # Explicitly listed in grid_mapping attribute: "crs_4326: latitude longitude"
+            assert gm.coordinates == ("latitude", "longitude"), (
+                f"Expected ('latitude', 'longitude'), got {gm.coordinates}"
+            )
+        elif gm.name == "transverse_mercator":
+            # Explicitly listed in grid_mapping attribute: "crs_27700: x27700 y27700"
+            assert gm.coordinates == ("x27700", "y27700"), (
+                f"Expected ('x27700', 'y27700'), got {gm.coordinates}"
+            )
+        elif gm.name == "lambert_azimuthal_equal_area":
+            # Not explicitly listed, should fallback to DataArray dimensions
+            assert gm.coordinates == ("x", "y"), (
+                f"Expected ('x', 'y') from DataArray dimensions, got {gm.coordinates}"
+            )
+            # Verify these are actually the DataArray's dimensions
+            assert gm.coordinates == da.dims, (
+                f"Fallback coordinates {gm.coordinates} don't match DataArray dims {da.dims}"
+            )
+
+
+@requires_pyproj
+def test_reduced_gaussian_grid_mapping_global():
+    """Test GridMapping integration for a full reduced gaussian grid."""
+    from ..datasets import reduced_gaussian_global_ds as ds
+
+    # Grid mapping discovery
+    assert ds.cf.grid_mapping_names == {"reduced_gaussian": ["reduced_gaussian"]}
+
+    # CF indexing returns the grid mapping variable
+    gm_var = ds.cf["reduced_gaussian"]
+    assert gm_var.attrs["grid_mapping_name"] == "reduced_gaussian"
+    assert gm_var.attrs["grid_subtype"] == "octahedral"
+
+    # Grid mapping propagation to data variables
+    da = ds.cf["air_temperature"]
+    assert "reduced_gaussian" in da.coords
+
+    # grid_mapping_name property
+    assert da.cf.grid_mapping_name == "reduced_gaussian"
+
+    # .cf.grid_mappings property returns valid GridMapping
+    gms = ds.cf.grid_mappings
+    assert len(gms) == 1
+    gm = gms[0]
+    assert gm.name == "reduced_gaussian"
+    assert gm.crs is not None
+    assert gm.crs.is_geographic
+    assert gm.array.name == "reduced_gaussian"
+    assert gm.array.shape == ()  # scalar variable
+    assert isinstance(gm.coordinates, tuple)
+    # Should detect reduced_gaussian_index via standard_name
+    assert "reduced_gaussian_index" in gm.coordinates
+
+    # DataArray grid_mappings should also work
+    da_gms = da.cf.grid_mappings
+    assert len(da_gms) == 1
+    assert da_gms[0].name == "reduced_gaussian"
+    assert da_gms[0].crs.is_geographic
+
+    # Repr should include reduced_gaussian
+    assert "reduced_gaussian" in ds.cf.__repr__()
+
+
+@requires_pyproj
+def test_reduced_gaussian_grid_mapping_land():
+    """Test GridMapping for a land-only subset using CF compress/gather."""
+    from ..datasets import reduced_gaussian_land_ds as ds
+
+    # Grid mapping discovery
+    assert ds.cf.grid_mapping_names == {"reduced_gaussian": ["reduced_gaussian"]}
+
+    # Grid mapping propagation
+    da = ds.cf["air_temperature"]
+    assert "reduced_gaussian" in da.coords
+
+    # .cf.grid_mappings property
+    gms = ds.cf.grid_mappings
+    assert len(gms) == 1
+    gm = gms[0]
+    assert gm.name == "reduced_gaussian"
+    assert gm.crs.is_geographic
+    assert gm.array.attrs["grid_subtype"] == "octahedral"
+
+    # Coordinates should include the compress/gather variable
+    assert "grid_points" in gm.coordinates
+
+    # Verify the dataset structure: data on grid_points, with compress attribute
+    assert "grid_points" in ds.dims
+    assert "compress" in ds.grid_points.attrs
+    assert ds.grid_points.attrs["compress"] == "reduced_gaussian_index"
+
+
+@requires_pyproj
+def test_reduced_gaussian_grid_mapping_region():
+    """Test GridMapping for a regional subset using CF compress/gather."""
+    from ..datasets import reduced_gaussian_region_ds as ds
+
+    # Grid mapping discovery
+    assert ds.cf.grid_mapping_names == {"reduced_gaussian": ["reduced_gaussian"]}
+
+    # Grid mapping propagation
+    da = ds.cf["air_temperature"]
+    assert "reduced_gaussian" in da.coords
+
+    # .cf.grid_mappings property
+    gms = ds.cf.grid_mappings
+    assert len(gms) == 1
+    gm = gms[0]
+    assert gm.name == "reduced_gaussian"
+    assert gm.crs.is_geographic
+
+    # Coordinates should include both reduced_gaussian_index and grid_points
+    assert "reduced_gaussian_index" in gm.coordinates
+    assert "grid_points" in gm.coordinates
+
+    # Verify compress structure
+    assert "grid_points" in ds.dims
+    assert ds.grid_points.attrs["compress"] == "reduced_gaussian_index"
+
+    # CRS earth parameters should match the grid mapping variable
+    gm_attrs = ds.reduced_gaussian.attrs
+    # The CRS should be built from semi_major/minor_axis
+    assert gm.crs.ellipsoid is not None
+    assert gm.crs.ellipsoid.semi_major_metre == gm_attrs["semi_major_axis"]
+
+
+@requires_pyproj
+def test_reduced_gaussian_crs_properties():
+    """Test that the CRS built for reduced_gaussian has correct properties."""
+    from ..datasets import reduced_gaussian_global_ds as ds
+
+    gm = ds.cf.grid_mappings[0]
+    crs = gm.crs
+
+    # Must be geographic (lat/lon on a sphere)
+    assert crs.is_geographic
+    assert not crs.is_projected
+
+    # Earth shape parameters from the grid mapping variable
+    assert crs.ellipsoid.semi_major_metre == 6371229.0
+    assert crs.ellipsoid.semi_minor_metre == 6371229.0
+
+    # Should not have an EPSG code (custom sphere)
+    assert crs.to_epsg() is None
+
+
+@requires_pyproj
+def test_bad_grid_mapping_attribute():
+    ds = rotds.copy(deep=False)
+    ds.temp.attrs["grid_mapping"] = "foo"
+    # warning when extracting a Datarray and grid_mapping does not exist
+    with pytest.warns(UserWarning):
+        ds.cf["temp"]
+    # warning when extracting a Dataset and grid_mapping does not exist
+    with pytest.warns(UserWarning):
+        ds.cf[["temp"]]
+    # this should probably also raise a warning (like cell_measures)
+    # with pytest.warns(UserWarning):
+    #    assert ds.cf.grid_mappings == {}
+    with pytest.warns(UserWarning):
+        ds.cf.get_associated_variable_names("temp", error=False)
+
+    # Test .grid_mappings property with bad grid mapping - should return empty tuple
+    grid_mappings = ds.cf.grid_mappings
+    assert grid_mappings == ()  # No valid grid mappings since 'foo' doesn't exist
+
+
+@requires_pyproj
+def test_healpix_grid_mapping():
+    """Test GridMapping integration for HEALPix grids."""
+    from ..datasets import healpix_ds as ds
+
+    # Grid mapping discovery
+    assert ds.cf.grid_mapping_names == {"healpix": ["healpix"]}
+
+    # Grid mapping propagation to data variables
+    da = ds.cf["air_temperature"]
+    assert "healpix" in da.coords
+
+    # grid_mapping_name property
+    assert da.cf.grid_mapping_name == "healpix"
+
+    # .cf.grid_mappings property on Dataset
+    gms = ds.cf.grid_mappings
+    assert len(gms) == 1
+    gm = gms[0]
+    assert gm.name == "healpix"
+    assert gm.crs is not None
+    assert gm.crs.is_geographic
+    assert gm.array.name == "healpix"
+    assert gm.array.shape == ()  # scalar variable
+    assert isinstance(gm.coordinates, tuple)
+    # Should detect healpix_index via standard_name
+    assert "healpix_index" in gm.coordinates
+
+    # DataArray grid_mappings should also work
+    da_gms = da.cf.grid_mappings
+    assert len(da_gms) == 1
+    assert da_gms[0].name == "healpix"
+    assert da_gms[0].crs.is_geographic
+
+    # Repr should include healpix
+    assert "healpix" in ds.cf.__repr__()
+
+
+@requires_pyproj
+def test_healpix_crs_properties():
+    """Test that the CRS built for HEALPix has correct properties."""
+    from ..datasets import healpix_ds as ds
+
+    gm = ds.cf.grid_mappings[0]
+    crs = gm.crs
+
+    # Must be geographic (lat/lon on a sphere)
+    assert crs.is_geographic
+    assert not crs.is_projected
+
+    # Earth shape parameters from the grid mapping variable
+    assert crs.ellipsoid.semi_major_metre == 6371000
+    assert crs.ellipsoid.semi_minor_metre == 6371000
+
+    # Should not have an EPSG code (custom sphere)
+    assert crs.to_epsg() is None
+
+    # Verify HEALPix-specific attributes are preserved in the grid mapping array
+    gm_attrs = gm.array.attrs
+    assert gm_attrs["grid_mapping_name"] == "healpix"
+    assert gm_attrs["refinement_level"] == 1
+    assert gm_attrs["indexing_scheme"] == "nested"
+    assert gm_attrs["earth_radius"] == 6371000
+
+
+def test_docstring() -> None:
     assert "One of ('X'" in airds.cf.groupby.__doc__
     assert "Time variable accessor e.g. 'T.month'" in airds.cf.groupby.__doc__
     assert "One or more of ('X'" in airds.cf.mean.__doc__
@@ -870,7 +1605,7 @@ def test_docstring():
     assert "present in .indexes" in airds.cf.resample.__doc__
 
     # Make sure docs are up to date
-    get_all_doc = cf_xarray.accessor._get_all.__doc__
+    get_all_doc: str = cf_xarray.accessor._get_all.__doc__  # type: ignore[assignment]
     all_keys = (
         cf_xarray.accessor._AXIS_NAMES
         + cf_xarray.accessor._COORD_NAMES
@@ -889,6 +1624,32 @@ def _make_names(prefixes):
     return [
         f"{prefix}{suffix}" for prefix, suffix in itertools.product(prefixes, suffixes)
     ]
+
+
+def _check_unchanged(old, new):
+    # Check data array attributes or global dataset attributes
+    def _check_attrs_equal(o, n):
+        # Compare values and keys,
+        # But not ids : allow for copied values (see #365)
+        assert o.keys() == n.keys()
+        for k, v in o.items():
+            if isinstance(v, np.ndarray):
+                assert np.all(v == n[k])
+            else:
+                assert v == n[k]
+
+    assert type(old) == type(new)  # noqa
+    _check_attrs_equal(old.attrs, new.attrs)
+
+    # Check coordinate attributes and data variable attributes
+    dicts = [(old.coords, new.coords)]
+    if isinstance(old, xr.Dataset):
+        dicts.append((old.data_vars, new.data_vars))
+    for old_dict, new_dict in dicts:
+        assert old_dict.keys() == new_dict.keys()  # set comparison
+        for key, old_obj in old_dict.items():
+            new_obj = new_dict[key]
+            _check_attrs_equal(old_obj.attrs, new_obj.attrs)
 
 
 _TIME_NAMES = ["t"] + _make_names(
@@ -920,8 +1681,8 @@ _VERTICAL_NAMES = _make_names(
         "nav_lev",
     ]
 )
-_X_NAMES = _make_names(["x", "nlon", "i", "ni"])
-_Y_NAMES = _make_names(["y", "nlat", "j", "nj"])
+_X_NAMES = _make_names(["x", "nlon", "i", "ni", "rlon"])
+_Y_NAMES = _make_names(["y", "nlat", "j", "nj", "rlat"])
 _Z_NAMES = _VERTICAL_NAMES + ["olevel", "level", "zlevel"]
 _LATITUDE_NAMES = _make_names(["lat", "latitude", "gphi", "nav_lat"])
 _LONGITUDE_NAMES = _make_names(["lon", "longitude", "glam", "nav_lon"])
@@ -953,14 +1714,14 @@ def test_guess_coord_axis(kind, names):
         assert dsnew[varname].attrs == ATTRS[kind]
 
 
-def test_guess_coord_axis_datetime():
+def test_guess_coord_axis_datetime() -> None:
     ds = xr.Dataset()
     ds["time"] = ("time", pd.date_range("2001-01-01", "2001-04-01"))
     dsnew = ds.cf.guess_coord_axis()
     assert dsnew.time.attrs == {"standard_name": "time", "axis": "T"}
 
 
-def test_attributes():
+def test_attributes() -> None:
     actual = airds.cf.sizes
     expected = {"X": 50, "Y": 25, "T": 4, "longitude": 50, "latitude": 25, "time": 4}
     assert actual == expected
@@ -972,7 +1733,7 @@ def test_attributes():
 
     assert airds.cf.chunks == {}
 
-    expected = {
+    expected_chunks = {
         "X": (50,),
         "Y": (5, 5, 5, 5, 5),
         "T": (4,),
@@ -980,27 +1741,27 @@ def test_attributes():
         "latitude": (5, 5, 5, 5, 5),
         "time": (4,),
     }
-    assert airds.chunk({"lat": 5}).cf.chunks == expected
+    assert airds.chunk({"lat": 5}).cf.chunks == expected_chunks
+    assert airds.chunk({"lat": 5}).cf.chunksizes == expected_chunks
 
     with pytest.raises(AttributeError):
         airds.da.cf.chunks
 
-    airds2 = airds.copy(deep=True)
+    airds2 = airds.copy(deep=False)
     airds2.lon.attrs = {}
     actual = airds2.cf.sizes
-    expected = {"lon": 50, "Y": 25, "T": 4, "latitude": 25, "time": 4}
-    assert actual == expected
+    expected_sizes = {"lon": 50, "Y": 25, "T": 4, "latitude": 25, "time": 4}
+    assert actual == expected_sizes
 
     actual = popds.cf.data_vars
-    expected = {
+    expected_data_vars = {
         "sea_water_x_velocity": popds.cf["UVEL"],
         "sea_water_potential_temperature": popds.cf["TEMP"],
     }
-    assert_dicts_identical(actual, expected)
+    assert_dicts_identical(actual, expected_data_vars)
 
     actual = multiple.cf.data_vars
-    expected = dict(multiple.data_vars)
-    assert_dicts_identical(actual, expected)
+    assert_dicts_identical(actual, dict(multiple.data_vars))
 
     # check that data_vars contains ancillary variables
     assert_identical(anc.cf.data_vars["specific_humidity"], anc.cf["specific_humidity"])
@@ -1016,21 +1777,21 @@ def test_attributes():
     assert_identical(ds1.cf.data_vars["T"], ds1["T"])
 
     # multiple latitudes but only one latitude data_var
-    ds = popds.copy(deep=True)
+    ds = popds.copy(deep=False)
     for var in ["ULAT", "TLAT"]:
         ds[var].attrs["standard_name"] = "latitude"
     ds = ds.reset_coords("ULAT")
     assert_identical(ds.cf.data_vars["latitude"], ds.cf["ULAT"])
 
 
-def test_missing_variable_in_coordinates():
+def test_missing_variable_in_coordinates() -> None:
     airds.air.attrs["coordinates"] = "lat lon time"
     with xr.set_options(keep_attrs=True):
         # keep bad coordinates attribute after mean
         assert_identical(airds.time, airds.air.cf.mean(["X", "Y"]).cf["time"])
 
 
-def test_Z_vs_vertical_ROMS():
+def test_Z_vs_vertical_ROMS() -> None:
     from ..datasets import romsds
 
     assert_identical(romsds.s_rho.reset_coords(drop=True), romsds.temp.cf["Z"])
@@ -1038,7 +1799,7 @@ def test_Z_vs_vertical_ROMS():
         romsds.z_rho_dummy.reset_coords(drop=True), romsds.temp.cf["vertical"]
     )
 
-    romsds = romsds.copy(deep=True)
+    romsds = romsds.copy(deep=False)
 
     romsds.temp.attrs.clear()
     # look in encoding
@@ -1056,55 +1817,34 @@ def test_Z_vs_vertical_ROMS():
     )
 
 
-def test_param_vcoord_ocean_s_coord():
-    romsds.s_rho.attrs["standard_name"] = "ocean_s_coordinate_g2"
-    Zo_rho = (romsds.hc * romsds.s_rho + romsds.Cs_r * romsds.h) / (
-        romsds.hc + romsds.h
-    )
-    expected = romsds.zeta + (romsds.zeta + romsds.h) * Zo_rho
+def test_decode_vertical_coords() -> None:
+    # Fixes 'UnboundLocalError: cannot access local variable 'romsds' where it is not associated with a value'
+    from ..datasets import romsds
+
+    # romsds already carries standard names on `eta` and `depth`, so the
+    # computed standard name can be derived without any extra setup.
     romsds.cf.decode_vertical_coords(outnames={"s_rho": "z_rho"})
-    assert_allclose(
-        romsds.z_rho.reset_coords(drop=True), expected.reset_coords(drop=True)
-    )
 
-    romsds.s_rho.attrs["standard_name"] = "ocean_s_coordinate_g1"
-    Zo_rho = romsds.hc * (romsds.s_rho - romsds.Cs_r) + romsds.Cs_r * romsds.h
+    assert romsds.z_rho.shape == (2, 30)
+    assert romsds.z_rho.attrs["standard_name"] == "height_above_geopotential_datum"
 
-    expected = Zo_rho + romsds.zeta * (1 + Zo_rho / romsds.h)
-    romsds.cf.decode_vertical_coords(outnames={"s_rho": "z_rho"})
-    assert_allclose(
-        romsds.z_rho.reset_coords(drop=True), expected.reset_coords(drop=True)
-    )
+    romsds = romsds.drop_vars("z_rho")
 
-    romsds.cf.decode_vertical_coords(outnames={"s_rho": "ZZZ_rho"})
-    assert "ZZZ_rho" in romsds.coords
+    with pytest.raises(
+        AssertionError, match="if prefix is None, outnames must be provided"
+    ):
+        romsds.cf.decode_vertical_coords()
 
-    copy = romsds.copy(deep=True)
-    del copy["zeta"]
-    with pytest.raises(KeyError):
-        copy.cf.decode_vertical_coords(outnames={"s_rho": "z_rho"})
+    with pytest.warns(DeprecationWarning):
+        romsds.cf.decode_vertical_coords(prefix="z_rho")
 
-    copy = romsds.copy(deep=True)
-    copy.s_rho.attrs["formula_terms"] = "s: s_rho C: Cs_r depth: h depth_c: hc"
-    with pytest.raises(KeyError):
-        copy.cf.decode_vertical_coords(outnames={"s_rho": "z_rho"})
+    romsds_less_h = romsds.drop_vars(["h"])
+
+    with pytest.raises(KeyError, match="Required term depth is absent in the dataset."):
+        romsds_less_h.cf.decode_vertical_coords(outnames={"s_rho": "z_rho"})
 
 
-def test_param_vcoord_ocean_sigma_coordinate():
-    expected = pomds.zeta + pomds.sigma * (pomds.depth + pomds.zeta)
-    pomds.cf.decode_vertical_coords(outnames={"sigma": "z"})
-    assert_allclose(pomds.z.reset_coords(drop=True), expected.reset_coords(drop=True))
-
-    copy = pomds.copy(deep=True)
-    del copy["zeta"]
-    with pytest.raises(AssertionError):
-        copy.cf.decode_vertical_coords()
-
-    with pytest.raises(KeyError):
-        copy.cf.decode_vertical_coords(outnames={})
-
-
-def test_formula_terms():
+def test_formula_terms() -> None:
     srhoterms = {
         "s": "s_rho",
         "C": "Cs_r",
@@ -1116,7 +1856,7 @@ def test_formula_terms():
     assert romsds["temp"].cf.formula_terms == srhoterms
     assert romsds["s_rho"].cf.formula_terms == srhoterms
 
-    s_rho = romsds["s_rho"].copy(deep=True)
+    s_rho = romsds["s_rho"].copy(deep=False)
     del s_rho.attrs["standard_name"]
     del s_rho.s_rho.attrs["standard_name"]  # TODO: xarray bug
     assert s_rho.cf.formula_terms == srhoterms
@@ -1126,7 +1866,7 @@ def test_formula_terms():
         romsds["zeta"].cf.formula_terms
 
 
-def test_standard_name_mapper():
+def test_standard_name_mapper() -> None:
     da = xr.DataArray(
         np.arange(6),
         dims="time",
@@ -1153,7 +1893,6 @@ def test_standard_name_mapper():
 @pytest.mark.parametrize("obj", objects)
 @pytest.mark.parametrize("attr", ["drop_vars", "set_coords"])
 def test_drop_vars_and_set_coords(obj, attr):
-
     # DataArray object has no attribute set_coords
     if not isinstance(obj, Dataset) and attr == "set_coords":
         return
@@ -1176,7 +1915,6 @@ def test_drop_vars_and_set_coords(obj, attr):
 
 @pytest.mark.parametrize("obj", objects)
 def test_drop_sel_and_reset_coords(obj):
-
     # Axis
     assert_identical(obj.drop_sel(lat=75), obj.cf.drop_sel(Y=75))
     # Coordinate
@@ -1193,7 +1931,6 @@ def test_drop_sel_and_reset_coords(obj):
 
 @pytest.mark.parametrize("ds", datasets)
 def test_drop_dims(ds):
-
     # Add data_var and coord to test _get_dims
     ds["lon_var"] = ds["lon"]
     ds = ds.assign_coords(lon_coord=ds["lon"])
@@ -1205,22 +1942,28 @@ def test_drop_dims(ds):
 
 @pytest.mark.parametrize("obj", objects)
 def test_rename(obj):
-
     cf_dict = {
         "air_temperature" if isinstance(obj, Dataset) else "longitude": "renamed"
     }
     xr_dict = {
-        "air"
-        if isinstance(obj, Dataset) and "air" in obj.data_vars
-        else "lon": "renamed"
+        (
+            "air" if isinstance(obj, Dataset) and "air" in obj.data_vars else "lon"
+        ): "renamed"
     }
     assert_identical(obj.rename(xr_dict), obj.cf.rename(cf_dict))
     assert_identical(obj.rename(**xr_dict), obj.cf.rename(**cf_dict))
 
 
+def test_rename_tuple():
+    obj = ds_with_tuple
+
+    cf_dict = {"air_temperature": "renamed"}
+    xr_dict = {(1, 2, 3): "renamed"}
+    assert_identical(obj.rename(xr_dict), obj.cf.rename(cf_dict))
+
+
 @pytest.mark.parametrize("ds", datasets)
 def test_differentiate(ds):
-
     # Add data_var and coord to test _get_coords
     ds["lon_var"] = ds["lon"]
     ds = ds.assign_coords(lon_coord=ds["lon"])
@@ -1233,21 +1976,21 @@ def test_differentiate(ds):
         assert_identical(ds.differentiate("lon"), ds.cf.differentiate("X"))
 
 
-def test_new_standard_name_mappers():
+def test_new_standard_name_mappers() -> None:
     assert_identical(forecast.cf.mean("realization"), forecast.mean("M"))
     assert_identical(
         forecast.cf.mean(["realization", "forecast_period"]), forecast.mean(["M", "L"])
     )
     assert_identical(forecast.cf.chunk({"realization": 1}), forecast.chunk({"M": 1}))
     assert_identical(forecast.cf.isel({"realization": 1}), forecast.isel({"M": 1}))
-    assert_identical(forecast.cf.isel(**{"realization": 1}), forecast.isel(**{"M": 1}))
+    assert_identical(forecast.cf.isel(realization=1), forecast.isel(M=1))
     assert_identical(
         forecast.cf.groupby("forecast_reference_time.month").mean(),
         forecast.groupby("S.month").mean(),
     )
 
 
-def test_possible_x_y_plot():
+def test_possible_x_y_plot() -> None:
     from ..accessor import _possible_x_y_plot
 
     # choose axes
@@ -1286,18 +2029,21 @@ def test_possible_x_y_plot():
     assert _possible_x_y_plot(xtds, "x", skip="lon") == "T"
 
 
-def test_groupby_special_ops():
+def test_groupby_special_ops() -> None:
     cfgrouped = airds.cf.groupby_bins("latitude", np.arange(20, 50, 10))
     grouped = airds.groupby_bins("lat", np.arange(20, 50, 10))
 
     # __iter__
-    for (label, group), (cflabel, cfgroup) in zip(grouped, cfgrouped):
+    for (label, group), (cflabel, cfgroup) in zip(grouped, cfgrouped, strict=True):
         assert label == cflabel
         assert_identical(group, cfgroup)
 
     # arithmetic
-    expected = grouped - grouped.mean()
-    actual = grouped - cfgrouped.mean()
+    # TODO: Extremely buggy!
+    # 1. cfgrouped - cfgrouped.mean() raises RecursionError
+    with xr.set_options(keep_attrs=True, use_flox=True):
+        expected = grouped - grouped.mean()
+        actual = grouped - cfgrouped.mean()
     assert_identical(expected, actual)
 
 
@@ -1362,7 +2108,7 @@ def test_differentiate_positive_upward(obj):
         obj.cf.differentiate("z", positive_upward=True)
 
 
-def test_cmip6_attrs():
+def test_cmip6_attrs() -> None:
     da = xr.DataArray(
         np.ones((10, 10)),
         dims=("nlon", "nlat"),
@@ -1383,7 +2129,7 @@ def test_cmip6_attrs():
     assert da.cf.axes["Y"] == ["nlat"]
 
 
-def test_custom_criteria():
+def test_custom_criteria() -> None:
     my_custom_criteria = {
         "ssh": {
             "standard_name": "sea_surface_elev*|sea_surface_height",
@@ -1407,6 +2153,10 @@ def test_custom_criteria():
     ds = xr.Dataset()
     ds["salinity"] = ("dim", np.arange(10))
     assert_identical(ds.cf["salt"], ds["salinity"])
+
+    # match by name of coords for DataArray (#378)
+    da = xr.DataArray([0, 1], coords={"salinity": [2, 3]})
+    assert_identical(da.cf["salt"], da["salinity"])
 
     # Match by standard_name regex match
     ds = xr.Dataset()
@@ -1460,18 +2210,37 @@ def test_custom_criteria():
         assert_identical(ds.cf["temp"], ds["temperature"])
 
 
-def test_cf_standard_name_table_version():
+def test_custom_criteria_membership() -> None:
+    custom_criteria = {
+        "salt": {"standard_name": "salinity"},
+        "ssh": {"standard_name": "sea_surface_height"},
+    }
+    ds = xr.Dataset({"salinity": ("time", [34.5, 35.0], {"standard_name": "salinity"})})
 
-    url = (
-        "https://raw.githubusercontent.com/cf-convention/cf-convention.github.io/"
-        "master/Data/cf-standard-names/current/src/cf-standard-name-table.xml"
-    )
-    expected_info, _, _ = parse_cf_standard_name_table(urlopen(url))
-    actual_info, _, _ = parse_cf_standard_name_table()
-    assert expected_info == actual_info
+    with cf_xarray.set_options(custom_criteria=custom_criteria):
+        assert "salt" in ds.cf.keys()
+        assert "salt" in ds.cf
+        assert "ssh" not in ds.cf.keys()
+        assert "ssh" not in ds.cf
 
 
-def test_add_canonical_attributes_0_dim():
+@requires_regex
+def test_regex_match():
+    # test that having a global regex expression flag later in the expression will work if
+    # regex is found
+    vocab = {"temp": {"name": "tem|(?i)temp"}}
+    ds = xr.Dataset()
+    ds["Tempblah"] = [0, 1, 2]
+    with cf_xarray.set_options(custom_criteria=vocab):
+        assert_identical(ds.cf["temp"], ds["Tempblah"])
+
+
+@requires_pooch
+def test_cf_standard_name_table_version() -> None:
+    parse_cf_standard_name_table()
+
+
+def test_add_canonical_attributes_0_dim() -> None:
     """test if works for variables with 0 dimension"""
     xr.DataArray(
         0, attrs={"standard_name": "sea_water_potential_temperature"}
@@ -1499,8 +2268,8 @@ def test_datetime_like(reshape):
 @pytest.mark.parametrize("skip", ["units", None])
 @pytest.mark.parametrize("verbose", [True, False])
 def test_add_canonical_attributes(override, skip, verbose, capsys):
-
     ds = airds
+    original = ds.copy(deep=True)
     cf_ds = ds.cf.add_canonical_attributes(
         override=override, skip=skip, verbose=verbose
     )
@@ -1508,11 +2277,11 @@ def test_add_canonical_attributes(override, skip, verbose, capsys):
     # Catch print
     captured = capsys.readouterr()
     if not verbose:
-        captured.out == ""
+        assert captured.out == ""
 
     # Attributes have been added
     for var in sum(ds.cf.standard_names.values(), []):
-        assert set(ds[var].attrs) < set(cf_ds[var].attrs)
+        assert set(ds[var].attrs) <= set(cf_ds[var].attrs)
 
     # Time units did not change
     assert ds["time"].attrs.get("units") is cf_ds["time"].attrs.get("units") is None
@@ -1547,68 +2316,146 @@ def test_add_canonical_attributes(override, skip, verbose, capsys):
         cf_da.attrs.pop("history")
         assert_identical(cf_da, cf_ds["air"])
 
-
-@pytest.mark.parametrize("op", ["ge", "gt", "eq", "ne", "le", "lt"])
-def test_flag_features(op):
-    actual = getattr(basin.cf, f"__{op}__")("atlantic_ocean")
-    expected = getattr(basin, f"__{op}__")(1)
-    assert_identical(actual, expected)
+    _check_unchanged(original, ds)
 
 
-def test_flag_isin():
-    actual = basin.cf.isin(["atlantic_ocean", "pacific_ocean"])
-    expected = basin.isin([1, 2])
-    assert_identical(actual, expected)
+class TestFlags:
+    @pytest.mark.parametrize("op", ["ge", "gt", "eq", "ne", "le", "lt"])
+    def test_flag_rich_comp(self, op) -> None:
+        actual = getattr(basin.cf, f"__{op}__")("atlantic_ocean")
+        expected = getattr(basin, f"__{op}__")(1)
+        assert_identical(actual, expected)
+
+    def test_flag_excl(self) -> None:
+        for i in range(3):
+            name = f"flag_{i + 1}"
+            expected = (flag_excl == i + 1).rename(name)
+            actual = flag_excl.cf.flags[name]
+            assert_identical(actual, expected)
+
+    def test_flag_indep(self) -> None:
+        expected = [
+            [False, True, False, True, False, True, False, True],  # bit 1
+            [False, False, True, True, False, False, True, True],  # bit 2
+            [False, False, False, False, True, True, True, True],  # bit 3
+        ]
+        for i in range(3):
+            name = f"flag_{2**i}"
+            res = flag_indep.cf.flags[name]
+            np.testing.assert_equal(res.to_numpy(), expected[i])
+
+    def test_flag_indep_uint16(self) -> None:
+        expected = [
+            [True, False, False, False, False, True],  # bit     1
+            [False, True, False, False, False, True],  # bit     2
+            [False, False, True, False, False, True],  # bit     4
+            [False, True, False, True, False, True],  # bit     8
+            [False, False, False, False, True, True],  # bit    16
+            [False, False, True, True, False, True],  # bit    32
+            [False, False, True, True, False, True],  # bit    64
+            [False, False, False, True, False, True],  # bit   128
+            [False, False, False, True, True, True],  # bit   256
+            [False, False, False, True, True, True],  # bit   512
+            [False, False, False, False, True, True],  # bit  1024
+            [False, False, False, False, False, True],  # bit  2048
+            [False, False, False, False, False, True],  # bit  4096
+            [False, False, False, False, True, True],  # bit  8192
+            [False, False, False, False, False, True],  # bit 16384
+            [False, False, False, False, False, True],  # bit 32768
+        ]
+        for i in range(16):
+            name = f"flag_{2**i}"
+            res = flag_indep_uint16.cf.flags[name]
+            np.testing.assert_equal(res.to_numpy(), expected[i])
+
+    def test_flag_mix(self) -> None:
+        expected = [
+            [False, False, True, True, False, False, True, True],  # flag 1
+            [False, False, False, False, True, True, True, True],  # flag 2
+            [True, False, False, True, False, False, True, False],  # flag 3
+            [False, True, False, False, True, False, False, False],  # flag 4
+            [False, False, True, False, False, True, False, False],  # flag 5
+        ]
+        for i in range(5):
+            name = f"flag_{i + 1}"
+            res = flag_mix.cf.flags[name]
+            np.testing.assert_equal(res.to_numpy(), expected[i])
+
+    @pytest.mark.parametrize(
+        "da, key", ((flag_indep, "flag_1"), (flag_mix, "flag_4"), (flag_excl, "flag_3"))
+    )
+    def test_flag_eq_ne(self, da, key) -> None:
+        assert_identical(da.cf.flags[key], (da.cf == key).rename(key))
+        assert_identical(~da.cf.flags[key], (da.cf != key).rename(key))
+
+    def test_flag_isin(self) -> None:
+        actual = flag_excl.cf.isin(["flag_1", "flag_3"])
+        expected = flag_excl.isin([1, 3])
+
+        actual = basin.cf.isin(["atlantic_ocean", "pacific_ocean"])
+        expected = basin.isin([1, 2])
+        assert_identical(actual, expected)
+
+        actual = flag_excl.cf.isin(["flag_ERR"])
+        assert not actual.any()
+
+    def test_flag_errors(self) -> None:
+        with pytest.raises(ValueError):
+            flag_mix.cf == "ERR"
+
+        flag_ex = flag_excl.copy()
+        flag_ex.attrs.pop("flag_values")
+        with pytest.raises(ValueError):
+            flag_ex.cf.isin(["flag_1"])
+
+        with pytest.raises(ValueError):
+            flag_ex.cf == "flag_1"
+
+        with pytest.raises(ValueError):
+            basin.cf == "arctic_ocean"
+
+        ds = xr.Dataset({"basin": basin})
+        with pytest.raises(ValueError):
+            ds.cf.isin(["atlantic_ocean"])
+
+        basin_ = basin.copy(deep=True)
+        basin_.attrs.pop("flag_values")
+        with pytest.raises(ValueError):
+            basin_.cf.isin(["pacific_ocean"])
+
+        with pytest.raises(ValueError):
+            basin_.cf == "pacific_ocean"
 
 
-def test_flag_errors():
-    with pytest.raises(ValueError):
-        basin.cf.isin(["arctic_ocean"])
-
-    with pytest.raises(ValueError):
-        basin.cf == "arctic_ocean"
-
-    ds = xr.Dataset({"basin": basin})
-    with pytest.raises(ValueError):
-        ds.cf.isin(["atlantic_ocean"])
-
-    basin.attrs.pop("flag_values")
-    with pytest.raises(ValueError):
-        basin.cf.isin(["pacific_ocean"])
-
-    with pytest.raises(ValueError):
-        basin.cf == "pacific_ocean"
-
-
-def test_missing_variables():
-
+def test_missing_variables() -> None:
     # Bounds
-    ds = mollwds.copy(deep=True)
+    ds = mollwds.copy(deep=False)
     ds = ds.drop_vars("lon_bounds")
     assert ds.cf.bounds == {"lat": ["lat_bounds"], "latitude": ["lat_bounds"]}
 
     with pytest.raises(KeyError, match=r"No results found for 'longitude'."):
-        ds.cf.get_bounds("longitude")
+        with pytest.warns(UserWarning, match="not found in object"):
+            ds.cf.get_bounds("longitude")
 
     # Cell measures
-    ds = airds.copy(deep=True)
+    ds = airds.copy(deep=False)
     ds = ds.drop_vars("cell_area")
     assert ds.cf.cell_measures == {}
 
     # Formula terms
-    ds = vert.copy(deep=True)
+    ds = vert.copy(deep=False)
     ds = ds.drop_vars("ap")
     assert ds.cf.formula_terms == {"lev": {"b": "b", "ps": "ps"}}
 
 
-def test_pickle():
+def test_pickle() -> None:
     da = xr.DataArray([1.0], name="a")
     ds = da.to_dataset()
     pickle.loads(pickle.dumps(da.cf))
     pickle.loads(pickle.dumps(ds.cf))
 
 
-def test_cf_role():
+def test_cf_role() -> None:
     for name in ["profile_id", "trajectory_id"]:
         assert name in dsg.cf.keys()
 
@@ -1619,3 +2466,230 @@ def test_cf_role():
 
     dsg.foo.cf.plot(x="profile_id")
     dsg.foo.cf.plot(x="trajectory_id")
+
+
+def test_grid_topology() -> None:
+    ds = xr.Dataset(
+        data_vars={},
+        coords={
+            "time": ("time", [1, 2, 3], {"standard_name": "time"}),
+            "mesh": (tuple(), 1, {"cf_role": "mesh_topology"}),
+            "grid": (tuple(), 1, {"cf_role": "grid_topology"}),
+        },
+    )
+    assert_identical(ds.cf["grid_topology"], ds.grid.reset_coords(drop=True))
+    assert_identical(ds.cf["mesh_topology"], ds.mesh.reset_coords(drop=True))
+    assert "T" in ds.cf.axes
+
+
+def test_ugrid_includes_topology_variables() -> None:
+    """The mesh_topology variable, its connectivity, and its coordinate
+    variables should be pulled in by ds.cf[[var]] for a UGRID data variable."""
+    ds = xr.Dataset(
+        data_vars={
+            "h": (
+                "face",
+                np.zeros(2),
+                {"mesh": "mesh", "location": "face"},
+            ),
+        },
+        coords={
+            "mesh": (
+                tuple(),
+                1,
+                {
+                    "cf_role": "mesh_topology",
+                    "topology_dimension": 2,
+                    "node_coordinates": "node_lon node_lat",
+                    "face_node_connectivity": "face_nodes",
+                    "edge_node_connectivity": "edge_nodes",
+                    "face_coordinates": "face_lon face_lat",
+                },
+            ),
+            "node_lon": ("node", np.zeros(4)),
+            "node_lat": ("node", np.zeros(4)),
+            "face_lon": ("face", np.zeros(2)),
+            "face_lat": ("face", np.zeros(2)),
+            "face_nodes": (("face", "nvertex"), np.zeros((2, 3))),
+            "edge_nodes": (("edge", "two"), np.zeros((3, 2))),
+        },
+    )
+
+    assoc = ds.cf.get_associated_variable_names("h")
+    assert {"mesh", "face_nodes", "edge_nodes"}.issubset(set(assoc["mesh"]))
+    assert {"node_lon", "node_lat", "face_lon", "face_lat"}.issubset(
+        set(assoc["coordinates"])
+    )
+
+    expected = {
+        "mesh",
+        "face_nodes",
+        "edge_nodes",
+        "node_lon",
+        "node_lat",
+        "face_lon",
+        "face_lat",
+    }
+    subset = ds.cf[["h"]]
+    assert expected.issubset(set(subset.variables))
+
+
+@requires_scipy
+def test_curvefit() -> None:
+    from cf_xarray.datasets import airds
+
+    def line(time, slope):
+        t = (time - time[0]).astype(float)
+        return slope * t
+
+    da = airds.air.cf.isel(lat=3, lon=3)
+    expected = da.curvefit(coords=("time",), func=line)
+    actual = da.cf.curvefit(coords="T", func=line)
+    assert_identical(expected, actual)
+
+    def plane(coords, slopex, slopey):
+        x, y = coords
+        return slopex * (x - x.mean()) + slopey * (y - y.mean())
+
+    da = airds.air.cf.isel(time=0)
+    actual = da.curvefit(coords=("lat", "lon"), func=plane)
+    expected = da.cf.curvefit(coords=["latitude", "longitude"], func=plane)
+    assert_identical(expected, actual)
+
+
+@requires_rich
+@pytest.mark.parametrize(
+    "obj, contains",
+    (
+        [airds.air, "Coordinates"],
+        [popds, "Data Variables"],
+        [basin, "Flag Variable"],
+        [flag_mix, "Flag Variable"],
+        [flag_indep, "Flag Variable"],
+        [flag_indep_uint16, "Flag Variable"],
+        [flag_excl, "Flag Variable"],
+        [dsg, "Discrete Sampling Geometry"],
+    ),
+)
+def test_rich_repr(obj, contains):
+    from rich.console import Console
+
+    console = Console()
+    console.begin_capture()
+    console.print(obj.cf)
+    printed = console.end_capture()
+
+    assert contains in printed
+
+
+def test_sgrid():
+    from ..sgrid import parse_axes
+
+    positions = ["psi", "u", "v", "rho"]
+    expected = {
+        "X": {f"xi_{pos}" for pos in positions},
+        "Y": {f"eta_{pos}" for pos in positions},
+        "Z": {"s_rho", "s_w"},
+    }
+    assert parse_axes(sgrid_roms) == expected
+    assert sgrid_roms.cf.axes == {"X": ["xi_u"], "Y": ["eta_u"]}
+
+    assert "grid" in sgrid_roms.cf["u"].coords
+    assert sgrid_roms.cf.get_associated_variable_names("u")["grid"] == ["grid"]
+
+    assert_identical(sgrid_roms.cf["X"], sgrid_roms.xi_u)
+    assert_identical(sgrid_roms.cf["Y"], sgrid_roms.eta_u)
+
+    with pytest.raises(KeyError):
+        sgrid_roms.u.cf["X"]
+    with pytest.raises(KeyError):
+        sgrid_roms.u.cf["Y"]
+
+    roms_ = sgrid_roms.set_coords("grid")
+    assert roms_.u.cf.axes == {"X": ["xi_u"], "Y": ["eta_u"]}
+    assert_identical(roms_.u.cf["X"], sgrid_roms.xi_u)
+    assert_identical(roms_.u.cf["Y"], sgrid_roms.eta_u)
+
+    for obj in [roms_, roms_.u]:
+        assert "xi_u" in obj.cf.__repr__()
+        assert "eta_u" in obj.cf.__repr__()
+
+    assert parse_axes(sgrid_delft) == {"X": {"icell", "inode"}, "Y": {"jcell", "jnode"}}
+    assert parse_axes(sgrid_delft3) == {
+        "X": {"iface", "inode"},
+        "Y": {"jface", "jnode"},
+        "Z": {"kface", "knode"},
+    }
+
+
+def test_sgrid_includes_topology_coordinates():
+    """Variables referenced in node/face/edge/volume_coordinates of the
+    grid_topology variable should be pulled in by ds.cf[[var]]."""
+    roms = sgrid_roms.copy()
+    for pos in ("psi", "rho", "u", "v"):
+        roms[f"lon_{pos}"] = ((f"xi_{pos}", f"eta_{pos}"), np.zeros((2, 2)))
+        roms[f"lat_{pos}"] = ((f"xi_{pos}", f"eta_{pos}"), np.zeros((2, 2)))
+
+    expected_coord_vars = {
+        "lon_psi",
+        "lat_psi",
+        "lon_rho",
+        "lat_rho",
+        "lon_u",
+        "lat_u",
+        "lon_v",
+        "lat_v",
+    }
+    assoc = roms.cf.get_associated_variable_names("u")
+    assert expected_coord_vars.issubset(set(assoc["coordinates"]))
+
+    subset = roms.cf[["u"]]
+    assert "grid" in subset.variables
+    assert expected_coord_vars.issubset(set(subset.variables))
+
+    # only dim-compatible coords attach to the DataArray form
+    u_da = roms.cf["u"]
+    assert {"lon_u", "lat_u"}.issubset(set(u_da.coords))
+
+    delft = sgrid_delft.copy()
+    delft["node_lon"] = (("inode", "jnode"), np.zeros((2, 2)))
+    delft["node_lat"] = (("inode", "jnode"), np.zeros((2, 2)))
+    delft["foo"] = (("icell", "jcell"), np.ones((2, 2)), {"grid": "grid"})
+    delft_subset = delft.cf[["foo"]]
+    assert {"grid", "node_lon", "node_lat"}.issubset(set(delft_subset.variables))
+
+
+def test_ancillary_variables_extra_dim():
+    ds = xr.Dataset(
+        {
+            "x": (
+                "x",
+                range(10),
+                {"axis": "X", "ancillary_variables": "position_flag"},
+            ),
+        }
+    )
+    with pytest.warns(UserWarning):
+        assert_identical(ds.cf["X"], ds["x"])
+
+
+def test_geometry_association(geometry_ds):
+    cf_ds, _ = geometry_ds
+    actual = cf_ds.cf[["data"]]
+    for name in ["geometry_container", "x", "y", "node_count", "crd_x", "crd_y"]:
+        assert name in actual.coords
+
+    actual = cf_ds.cf["data"]
+    for name in ["geometry_container", "node_count", "crd_x", "crd_y"]:
+        assert name in actual.coords
+
+    assert cf_ds.cf.geometries == {"point": ["geometry_container"]}
+    assert_identical(cf_ds.cf["geometry"], cf_ds["geometry_container"])
+    with pytest.raises(ValueError):
+        cf_ds.cf["point"]
+
+    expected = cf_ds[["geometry_container", "node_count", "x", "y", "crd_x", "crd_y"]]
+    assert_identical(
+        cf_ds.cf[["point"]],
+        expected.set_coords(["node_count", "x", "y", "crd_x", "crd_y"]),
+    )

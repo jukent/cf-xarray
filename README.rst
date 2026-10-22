@@ -6,7 +6,7 @@
     :target: https://cf-xarray.readthedocs.io/en/latest/?badge=latest
     :alt: Documentation Status
 
-.. image:: https://img.shields.io/github/workflow/status/xarray-contrib/cf-xarray/CI?logo=github&style=for-the-badge
+.. image:: https://img.shields.io/github/actions/workflow/status/xarray-contrib/cf-xarray/ci.yaml?branch=main&logo=github&style=for-the-badge
     :target: https://github.com/xarray-contrib/cf-xarray/actions
     :alt: GitHub Workflow CI Status
 
@@ -14,9 +14,9 @@
    :target: https://results.pre-commit.ci/latest/github/xarray-contrib/cf-xarray/main
    :alt: pre-commit.ci status
 
-.. image:: https://img.shields.io/codecov/c/github/xarray-contrib/cf-xarray.svg?style=for-the-badge
-    :target: https://codecov.io/gh/xarray-contrib/cf-xarray
-    :alt: Code Coverage
+.. image:: https://codecov.io/gh/xarray-contrib/cf-xarray/branch/main/graph/badge.svg?token=hR3x9559bZ
+   :target: https://codecov.io/gh/xarray-contrib/cf-xarray
+   :alt: Code Coverage
 
 .. image:: https://img.shields.io/pypi/v/cf-xarray.svg?style=for-the-badge
     :target: https://pypi.org/project/cf-xarray
@@ -28,6 +28,9 @@
 
 .. image:: https://zenodo.org/badge/267381269.svg
    :target: https://zenodo.org/badge/latestdoi/267381269
+
+.. image:: https://img.shields.io/badge/fair--software.eu-%E2%97%8F%20%20%E2%97%8F%20%20%E2%97%8F%20%20%E2%97%8F%20%20%E2%97%8B-yellow
+   :target: https://fair-software.eu
 
 cf-xarray
 =========

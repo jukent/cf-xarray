@@ -26,6 +26,10 @@ xr.set_options(display_expand_data=False)
 
 `cf_xarray` aims to support encoding and decoding variables using CF conventions not yet implemented by Xarray.
 
+## Geometries
+
+See [](./geometry.md) for more.
+
 ## Compression by gathering
 
 The ["compression by gathering"](http://cfconventions.org/Data/cf-conventions/cf-conventions-1.8/cf-conventions.html#compression-by-gathering)
@@ -34,7 +38,7 @@ convention could be used for either {py:class}`pandas.MultiIndex` objects or `py
 ### MultiIndex
 
 `cf_xarray` provides {py:func}`encode_multi_index_as_compress` and {py:func}`decode_compress_to_multi_index` to encode MultiIndex-ed
-dimensions using "compression by gethering".
+dimensions using "compression by gathering".
 
 Here's a test dataset
 

@@ -22,7 +22,15 @@ xr.set_options(display_expand_data=False)
 
 # Selecting DataArrays
 
-A second powerful feature of `cf_xarray` is the ability select DataArrays using special "CF names" like the "latitude", or "longitude" coordinate names, "X"  or "Y" axes names, oreven using the `standard_name` attribute if present.
+```{seealso}
+CF conventions on
+1. [coordinate variables](http://cfconventions.org/Data/cf-conventions/cf-conventions-1.8/cf-conventions.html#coordinate-types)
+1. [cell bounds and measures](http://cfconventions.org/Data/cf-conventions/cf-conventions-1.8/cf-conventions.html#_data_representative_of_cells)
+1. [standard name](http://cfconventions.org/Data/cf-conventions/cf-conventions-1.8/cf-conventions.html#standard-name)
+1. [ancillary data](http://cfconventions.org/Data/cf-conventions/cf-conventions-1.8/cf-conventions.html#ancillary-data)
+```
+
+A powerful feature of `cf_xarray` is the ability select DataArrays using special "CF names" like the "latitude", or "longitude" coordinate names, "X" or "Y" axes names, oreven using the `standard_name` attribute if present.
 
 To demonstrate this, let's load a few datasets
 
@@ -83,7 +91,7 @@ anc
 
 ## Selecting multiple variables
 
-Sometimes a Dataset may contain multiple `X` or multiple `longitude` variables. In that case a simple `.cf["X"]` will raise an error. Instead follow Xarray convention and pass a  list `.cf[["X"]]` to receive a Dataset with all available `"X"` variables
+Sometimes a Dataset may contain multiple `X` or multiple `longitude` variables. In that case a simple `.cf["X"]` will raise an error. Instead follow Xarray convention and pass a list `.cf[["X"]]` to receive a Dataset with all available `"X"` variables
 
 ```{code-cell}
 multiple.cf[["X"]]
@@ -95,7 +103,7 @@ pop.cf[["longitude"]]
 
 ## Mixing names
 
-cf_xarray aims to be as friendly as possible, so it is  possible to mix "CF names" and normal variable names. Here we select `UVEL` and `TEMP` by using the `standard_name` of `TEMP` (which is `sea_water_potential_temperature`)
+cf_xarray aims to be as friendly as possible, so it is possible to mix "CF names" and normal variable names. Here we select `UVEL` and `TEMP` by using the `standard_name` of `TEMP` (which is `sea_water_potential_temperature`)
 
 ```{code-cell}
 pop.cf[["sea_water_potential_temperature", "UVEL"]]

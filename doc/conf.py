@@ -33,7 +33,7 @@ sys.path.insert(0, parent)
 # -- General configuration -----------------------------------------------------
 
 # If your documentation needs a minimal Sphinx version, state it here.
-# needs_sphinx = '1.0'
+# needs_sphinx = "6.0"
 
 # Add any Sphinx extension module names here, as strings. They can be extensions
 # coming with Sphinx (named 'sphinx.ext.*') or your custom ones.
@@ -52,8 +52,8 @@ extensions = [
 ]
 
 extlinks = {
-    "issue": ("https://github.com/xarray-contrib/cf-xarray/issues/%s", "GH#"),
-    "pr": ("https://github.com/xarray-contrib/cf-xarray/pull/%s", "GH#"),
+    "issue": ("https://github.com/xarray-contrib/cf-xarray/issues/%s", "GH#%s"),
+    "pr": ("https://github.com/xarray-contrib/cf-xarray/pull/%s", "GH#%s"),
 }
 
 # Add any paths that contain templates here, relative to this directory.
@@ -265,4 +265,11 @@ napoleon_use_param = True
 napoleon_use_rtype = True
 
 numpydoc_show_class_members = False
-numpydoc_validation_checks = {"all"}
+# Disable numpydoc validation to avoid compatibility issues with Sphinx 8
+numpydoc_validation_checks = set()
+# don't report on objects that match any of these regex
+numpydoc_validation_exclude = {
+    "cf_xarray.accessor.",
+    r"\.__repr__$",
+    "cf_xarray.set_options.",
+}

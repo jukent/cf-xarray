@@ -1,10 +1,10 @@
 import importlib
 import re
 from contextlib import contextmanager
-from distutils import version
 
 import dask
 import pytest
+from packaging import version
 
 
 @contextmanager
@@ -32,8 +32,7 @@ class CountingScheduler:
         self.total_computes += 1
         if self.total_computes > self.max_computes:
             raise RuntimeError(
-                "Too many computes. Total: %d > max: %d."
-                % (self.total_computes, self.max_computes)
+                f"Too many computes. Total:{self.total_computes} > max: {self.max_computes}."
             )
         return dask.get(dsk, keys, **kwargs)
 
@@ -60,9 +59,14 @@ def LooseVersion(vstring):
     # Our development version is something like '0.10.9+aac7bfc'
     # This function just ignored the git commit id.
     vstring = vstring.split("+")[0]
-    return version.LooseVersion(vstring)
+    return version.parse(vstring)
 
 
-has_pint, requires_pint = _importorskip("pint")
-has_shapely, requires_shapely = _importorskip("shapely")
 has_cftime, requires_cftime = _importorskip("cftime")
+has_scipy, requires_scipy = _importorskip("scipy")
+has_shapely, requires_shapely = _importorskip("shapely")
+has_pint, requires_pint = _importorskip("pint")
+has_pooch, requires_pooch = _importorskip("pooch")
+_, requires_rich = _importorskip("rich")
+has_regex, requires_regex = _importorskip("regex")
+has_pyproj, requires_pyproj = _importorskip("pyproj")

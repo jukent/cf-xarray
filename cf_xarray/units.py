@@ -1,69 +1,66 @@
 """Module to provide unit support via pint approximating UDUNITS/CF."""
+
 import functools
 import re
-import warnings
 
 import pint
-from pint import (  # noqa: F401
-    DimensionalityError,
-    UndefinedUnitError,
-    UnitStrippedWarning,
-)
+from packaging.version import Version
 
-# from `xclim`'s unit support module with permission of the maintainers
-try:
+from .utils import emit_user_level_warning
 
-    @pint.register_unit_format("cf")
-    def short_formatter(unit, registry, **options):
-        """Return a CF-compliant unit string from a `pint` unit.
 
-        Parameters
-        ----------
-        unit : pint.UnitContainer
-            Input unit.
-        registry : pint.UnitRegistry
-            the associated registry
-        **options
-            Additional options (may be ignored)
+@pint.register_unit_format("cf")
+def short_formatter(unit, registry, **options):
+    """Return a CF-compliant unit string from a `pint` unit.
 
-        Returns
-        -------
-        out : str
-            Units following CF-Convention, using symbols.
-        """
-        import re
+    Parameters
+    ----------
+    unit : pint.UnitContainer
+        Input unit.
+    registry : pint.UnitRegistry
+        The associated registry
+    **options
+        Additional options (may be ignored)
 
-        # convert UnitContainer back to Unit
-        unit = registry.Unit(unit)
-        # Print units using abbreviations (millimeter -> mm)
-        s = f"{unit:~D}"
+    Returns
+    -------
+    out : str
+        Units following CF-Convention, using symbols.
+    """
+    # pint 0.24.1 gives {"dimensionless": 1} for non-shortened dimensionless units
+    # CF uses "1" to denote fractions and dimensionless quantities
+    if unit == {"dimensionless": 1} or not unit:
+        return "1"
 
-        # Search and replace patterns
-        pat = r"(?P<inverse>(?:1 )?/ )?(?P<unit>\w+)(?: \*\* (?P<pow>\d))?"
+    # If u is a name, get its symbol (same as pint's "~" pre-formatter)
+    # otherwise, assume a symbol (pint should have already raised on invalid units before this)
+    unit = pint.util.UnitsContainer(
+        {
+            registry._get_symbol(u) if u in registry._units else u: exp
+            for u, exp in unit.items()
+        }
+    )
 
-        def repl(m):
-            i, u, p = m.groups()
-            p = p or (1 if i else "")
-            neg = "-" if i else ""
+    # Change in formatter signature in pint 0.24
+    if Version(pint.__version__) < Version("0.24"):
+        args = (unit.items(),)
+    else:
+        # Numerators splitted from denominators
+        args = (
+            ((u, e) for u, e in unit.items() if e >= 0),
+            ((u, e) for u, e in unit.items() if e < 0),
+        )
 
-            return f"{u}{neg}{p}"
+    out = pint.formatter(*args, as_ratio=False, product_fmt=" ", power_fmt="{}{}")
+    # To avoid potentiel unicode problems in netCDF. In both cases, this unit is not recognized by udunits
+    return out.replace("Δ°", "delta_deg")
 
-        out, n = re.subn(pat, repl, s)
-
-        # Remove multiplications
-        out = out.replace(" * ", " ")
-        # Delta degrees:
-        out = out.replace("Δ°", "delta_deg")
-        return out.replace("percent", "%")
-
-except ImportError:
-    pass
 
 # ------
 # Reused with modification from MetPy under the terms of the BSD 3-Clause License.
 # Copyright (c) 2015,2017,2019 MetPy Developers.
 # Create registry, with preprocessors for UDUNITS-style powers (m2 s-2) and percent signs
-units = pint.UnitRegistry(
+units: pint.UnitRegistry = pint.UnitRegistry(
     autoconvert_offset_to_baseunit=True,
     preprocessors=[
         functools.partial(
@@ -76,10 +73,14 @@ units = pint.UnitRegistry(
     ],
     force_ndarray_like=True,
 )
+# ----- end block copied from metpy
 
-units.define(
-    pint.unit.UnitDefinition("percent", "%", (), pint.converters.ScaleConverter(0.01))
-)
+# need to insert to make sure this is the first preprocessor
+# This ensures we convert integer `1` to string `"1"`, as needed by pint.
+units.preprocessors.insert(0, str)
+
+# -----
+units.define("percent = 0.01 = %")
 
 # Define commonly encountered units (both CF and non-CF) not defined by pint
 units.define("@alias meter = gpm")
@@ -91,7 +92,7 @@ units.define("@alias meter = gpm")
 units.define("year = 365.25 * day = yr")
 
 # Define commonly encountered units not defined by pint
-units.define("@alias degC = C = deg_C = degrees_Celsius")
+units.define("@alias degC = C = deg_C = Celsius = degrees_Celsius")
 units.define("@alias degK = deg_K")
 units.define("@alias day = d")
 units.define("@alias hour = h")  # Not the Planck constant...
@@ -101,6 +102,8 @@ units.define(
 units.define(
     "degrees_east = degree = degrees_east = degrees_E = degreesE = degree_east = degree_E = degreeE"
 )
+# degrees for grid_longitude / grid_latitude for grid_mappings
+units.define("degrees = degree = degrees")
 units.define("[speed] = [length] / [time]")
 # ----- end block copied from xclim
 
@@ -111,9 +114,10 @@ units.define("practical_salinity_unit = [] = psu = PSU")
 try:
     units.setup_matplotlib()
 except ImportError:
-    warnings.warn(
+    emit_user_level_warning(
         "Import(s) unavailable to set up matplotlib support...skipping this portion "
-        "of the setup."
+        "of the setup.",
+        UserWarning,
     )
 # end of vendored code from MetPy
 

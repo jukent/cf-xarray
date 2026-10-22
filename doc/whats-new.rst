@@ -3,8 +3,106 @@
 What's New
 ----------
 
-v0.7.3 (unreleased)
-===================
+For updates since Feb 2023 see the `Github releases page <https://github.com/xarray-contrib/cf-xarray/releases>`_.
+
+v0.8.9 (Feb 06, 2023)
+=====================
+- Convert integer (e.g. ``1``) units to string (e.g. ``"1"``) for pint. By `Justus Magin`_.
+
+v0.8.8 (Jan 19, 2023)
+=====================
+- Add conversion between CF geometries and Shapely objects for polygons. By `Julia Signell`_.
+- Support 32bit wide bit masks. By `Michael St Laurent`_.
+
+v0.8.7 (Dec 19, 2023)
+=====================
+- Add conversion between CF geometries and Shapely objects for lines. By `Julia Signell`_.
+
+v0.8.5 (Oct 24, 2023)
+=====================
+- Fix for ``get_bounds_dim_name``. By `Deepak Cherian`_.
+
+v0.8.2 (July 05, 2023)
+======================
+- Better reprs for flag masks. By `Deepak Cherian`_.
+
+v0.8.2 (June 23, 2023)
+======================
+- Support for flag masks. By `Clément Haëck`_ and `Deepak Cherian`_.
+
+v0.8.1 (May 9, 2023)
+====================
+- Stop bundling the standard name table and use ``pooch`` (new optional dependency) to download when needed.
+  By `Deepak Cherian`_.
+- Major performance improvements.  By `Deepak Cherian`_.
+- Fix bug where code was looking for ``T`` axis in SGRID info.
+  By `Kristen Thyng`_.
+- Support ``X``, ``Y`` for rotated pole grids.  By `Lars Buntemeyer`_.
+
+
+v0.8.0 (Feb 8, 2023)
+====================
+
+- Support interpreting `SGRID Conventions <https://sgrid.github.io/sgrid/>`_ to identify
+  X, Y, Z axes. By `Deepak Cherian`_.
+- Add a `rich <https://rich.readthedocs.io>`_ repr. (:pr:`409`).
+  Use ``rich.print(ds.cf)`` or ``%load_ext rich`` in a Jupyter session to
+  view a much richer representation of the ``.cf`` accessor. By `Deepak Cherian`_.
+- Support interpreting the ``grid_mapping`` attribute: (:pr:`391`).
+  See :py:meth:`Dataset.cf.grid_mapping_names` and ``Dataset.cf["grid_mapping"]``,
+  ``DataArray.cf["grid_mapping"]``. By `Lars Buntemeyer`_ and `Deepak Cherian`_.
+
+
+v0.7.9 (Jan 31, 2023)
+=====================
+
+- Fix packaging of v0.7.8. That release was yanked off PyPI.
+
+v0.7.8 (Jan 31, 2023)
+=====================
+
+- Optionally use the ``regex`` package to continue supporting global flags in regular expressions that are not at start of pattern (:pr:`408`). By `Kristen Thyng`_
+- Added link to docs for a new example "COSIMA ocean-sea ice model demo" (:pr:`397`). By `Aidan Heerdegen`_
+
+v0.7.7 (Jan 14, 2023)
+=====================
+
+- Fix to ``geometry.points_to_cf`` to support shapely 2.0. (:pr:`386`).
+  By `Pascal Bourgault`_
+
+v0.7.6 (Dec 07, 2022)
+=====================
+
+- Fix to ``cf.add_bounds`` to support all types of curved grids (:pr:`376`).
+  By `Pascal Bourgault`_
+- Allow custom criteria to match the variable name of DataArray objects (:pr:`379`). By `Mathias Hauser`_
+- Support new Xarray indexes API when creating MultiIndex for "compression by gathering" datasets.
+  (:pr:`381`). By `Deepak Cherian`_
+
+v0.7.5 (Nov 15, 2022)
+=====================
+
+- ``cf.add_bounds`` can estimate 2D bounds using an approximate linear interpolation (:pr:`370`).
+  By `Pascal Bourgault`_.
+- Improve detection of bounds order by rellaxing check a bit (:pr:`361`).
+  By `Lars Buntemeyer`_.
+- Performance improvements. (:pr:`358`). By `Luke Davis`_
+- Fix coordinate/axis detection (:pr:`359`). By `Martin Schupfner`_
+
+v0.7.4 (July 14, 2022)
+======================
+
+- Major performance improvement for ``__getitem_`` (:pr:`349`).
+  By `Deepak Cherian`_.
+- Raise warning instead of error with malformed ``cell_measures`` attributes. Warnings
+  now print names of variables with malformed attributes (:pr:`350`).
+  By `Deepak Cherian`_.
+
+v0.7.3 (June 30, 2022)
+======================
+- :py:meth:`Dataset.cf.guess_coord_axis` now skips known axes/coordinates and only returns a single guess per variable.
+  Additional attributes such as ``units`` must be added to known axes/coordinates using :py:meth:`Dataset.cf.add_canonical_attributes`.
+  By `Mattia Almansi`_.
 - Increased support for ``cf_role`` variables. Added :py:attr:`Dataset.cf.cf_roles` By `Deepak Cherian`_.
 
 v0.7.2 (April 5, 2022)
@@ -47,7 +145,7 @@ v0.6.0 (June 29, 2021)
 - Begin adding support for units with a unit registry for pint arrays. :pr:`197`.
   By `Jon Thielen`_ and `Justus Magin`_.
 - :py:meth:`Dataset.cf.rename_like` also updates the ``bounds`` and ``cell_measures`` attributes. By `Mattia Almansi`_.
-- Support of custom vocabularies/criteria: user can input criteria for identifying variables by their name and attributes to be able to refer to them by custom names like `ds.cf["ssh"]`. :pr:`234`. By `Kristen Thyng`_ and `Deepak Cherian`_.
+- Support of custom vocabularies/criteria: user can input criteria for identifying variables by their name and attributes to be able to refer to them by custom names like ``ds.cf["ssh"]``. :pr:`234`. By `Kristen Thyng`_ and `Deepak Cherian`_.
 
 v0.5.2 (May 11, 2021)
 =====================
@@ -157,7 +255,14 @@ v0.1.3
 .. _`Julia Kent`: https://github.com/jukent
 .. _`Kristen Thyng`: https://github.com/kthyng
 .. _`Julius Busecke`: https://github.com/jbusecke
-.. _`Filipe Fernandes`: https://github.com/ocefpaf
 .. _`Tom Vo`: https://github.com/tomvothecoder
 .. _`Romain Caneill`: https://github.com/rcaneill
+.. _`Lars Buntemeyer`: https://github.com/larsbuntemeyer
+.. _`Luke Davis`: https://github.com/lukelbd
+.. _`Martin Schupfner`: https://github.com/sol1105
+.. _`Mathias Hauser`: https://github.com/mathause
+.. _`Aidan Heerdegen`: https://github.com/aidanheerdegen
+.. _`Clément Haëck`: https://github.com/Descanonge
+.. _`Julia Signell`: https://github.com/jsignell
+.. _`Michael St Laurent`: https://github.com/mps010160
 .. _`flag variables`: http://cfconventions.org/Data/cf-conventions/cf-conventions-1.8/cf-conventions.html#flags

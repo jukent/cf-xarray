@@ -16,6 +16,26 @@ Top-level API
     set_options
     encode_multi_index_as_compress
     decode_compress_to_multi_index
+    GridMapping
+
+Geometries
+----------
+.. autosummary::
+    :toctree: generated/
+
+    geometry.decode_geometries
+    geometry.encode_geometries
+    geometry.shapely_to_cf
+    geometry.cf_to_shapely
+    geometry.GeometryNames
+
+
+Groupers
+--------
+.. autosummary::
+    :toctree: generated/
+
+   groupers.FlagGrouper
 
 .. currentmodule:: xarray
 
@@ -36,6 +56,8 @@ Attributes
     DataArray.cf.cf_roles
     DataArray.cf.coordinates
     DataArray.cf.formula_terms
+    DataArray.cf.grid_mapping_name
+    DataArray.cf.grid_mappings
     DataArray.cf.is_flag_variable
     DataArray.cf.standard_names
     DataArray.cf.plot
@@ -94,6 +116,9 @@ Attributes
     Dataset.cf.cf_roles
     Dataset.cf.coordinates
     Dataset.cf.formula_terms
+    Dataset.cf.grid_mapping_names
+    Dataset.cf.grid_mappings
+    Dataset.cf.geometries
     Dataset.cf.standard_names
 
 .. _dsmeth:

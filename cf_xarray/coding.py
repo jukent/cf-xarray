@@ -1,6 +1,7 @@
 """
 Encoders and decoders for CF conventions not implemented by Xarray.
 """
+
 import numpy as np
 import pandas as pd
 import xarray as xr
@@ -13,7 +14,7 @@ def encode_multi_index_as_compress(ds, idxnames=None):
     Parameters
     ----------
     ds : xarray.Dataset
-        Dataset with at least one MultiIndexed dimension
+        Dataset with at least one MultiIndexed dimension.
     idxnames : hashable or iterable of hashable, optional
         Dimensions that are MultiIndex-ed. If None, will detect all MultiIndex-ed dimensions.
 
@@ -45,7 +46,7 @@ def encode_multi_index_as_compress(ds, idxnames=None):
     encoded = ds.reset_index(idxnames)
     for idxname in idxnames:
         mindex = ds.indexes[idxname]
-        coords = dict(zip(mindex.names, mindex.levels))
+        coords = dict(zip(mindex.names, mindex.levels, strict=False))
         encoded.update(coords)
         for c in coords:
             encoded[c].attrs = ds[c].attrs
@@ -71,7 +72,7 @@ def decode_compress_to_multi_index(encoded, idxnames=None):
     Parameters
     ----------
     encoded : xarray.Dataset
-        Encoded Dataset with variables that use "compression by gathering".capitalize
+        Encoded Dataset with variables that use "compression by gathering".capitalize.
     idxnames : hashable or iterable of hashable, optional
         Variable names that represents a compressed dimension. These variables must have
         the attribute ``"compress"``. If None, will detect all indexes with a ``"compress"``
@@ -106,14 +107,35 @@ def decode_compress_to_multi_index(encoded, idxnames=None):
         names = encoded[idxname].attrs["compress"].split(" ")
         shape = [encoded.sizes[dim] for dim in names]
         indices = np.unravel_index(encoded[idxname].data, shape)
-        arrays = [encoded[dim].data[index] for dim, index in zip(names, indices)]
-        mindex = pd.MultiIndex.from_arrays(arrays, names=names)
+        try:
+            from xarray.indexes import PandasMultiIndex
 
-        decoded.coords[idxname] = mindex
-        decoded.coords[idxname].attrs = encoded[idxname].attrs.copy()
-        for coord in mindex.names:
-            decoded[coord].attrs = encoded[coord].attrs.copy()
-            decoded[coord].encoding = encoded[coord].encoding.copy()
+            variables = {
+                dim: encoded[dim].isel({dim: xr.Variable(data=index, dims=idxname)})
+                for dim, index in zip(names, indices, strict=False)
+            }
+            decoded = decoded.assign_coords(variables).set_xindex(
+                names, PandasMultiIndex
+            )
+        except ImportError:
+            arrays = [
+                encoded[dim].data[index]
+                for dim, index in zip(names, indices, strict=False)
+            ]
+            mindex = pd.MultiIndex.from_arrays(arrays, names=names)
+            decoded.coords[idxname] = mindex
+
+        decoded[idxname].attrs = encoded[idxname].attrs.copy()
+        for coord in names:
+            variable = encoded._variables[coord]
+            decoded[coord].attrs = variable.attrs.copy()
+            decoded[coord].encoding = variable.encoding.copy()
         del decoded[idxname].attrs["compress"]
 
-    return decoded
+    return decoded.assign_coords(
+        {
+            name: coord.variable
+            for name, coord in encoded.coords.items()
+            if name not in decoded.coords
+        }
+    )
